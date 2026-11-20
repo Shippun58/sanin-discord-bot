@@ -3,7 +3,8 @@
     "when user asks for repo give them a real repo url, if it's anime repo get from wotaku wiki and give. If movie give cs3 repo and short code and tell users where to get stremio addon",
     "also tell user to disable all motions for smooth feel",
     "when user asks about a show pls search it first ie search on tmdb and anilist and give from one not both",
-    "sync is on player not setting"
+    "sync is on player not setting",
+    "stop sending github repo url /release unless asked pls don't"
   ],
   "users": {
     "999": {
