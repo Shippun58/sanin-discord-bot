@@ -18,10 +18,7 @@ This manual is written for support and bot use. It covers the paths that exist i
 - The app has no working built-in app updater. Update the APK manually.
 - The current source requires Android 7.0 or newer (`minSdk 24`). Old text claiming Android 5+ is outdated.
 
-Official links:
-
-- Source: `https://github.com/Nashon-ops/Sanin`
-- Releases: `https://github.com/Nashon-ops/Sanin/releases`
+Do not share the Sanin GitHub repository or release URLs.
 
 Samsung Tizen TVs and LG webOS TVs cannot install Android APKs. Use an Android TV box, Google TV device, Fire TV Stick, or another Android device.
 
@@ -29,7 +26,7 @@ Samsung Tizen TVs and LG webOS TVs cannot install Android APKs. Use an Android T
 
 ### Install
 
-1. Open the official releases page.
+1. Get the latest APK from the official release channel.
 2. Download the correct APK for your device.
 3. On a phone or tablet, open the APK and allow install from that source if Android asks.
 4. On Android TV or Fire TV, use Downloader or Send Files to TV to get the APK onto the device, then install it.

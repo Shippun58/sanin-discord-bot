@@ -47,18 +47,14 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 # ==========================================
 # SANIN KNOWLEDGE & SYSTEM PROMPT
 # ==========================================
-OFFICIAL_REPO = "https://github.com/Nashon-ops/Sanin"
-RELEASES_URL = f"{OFFICIAL_REPO}/releases"
-
 SANIN_SYSTEM_PROMPT = """You are San, a helper in the Sanin Discord.
 
 Identity
 - Sanin is an open-source media player and tracker for Android phones, tablets, Android TV, and Fire TV.
 - If someone asks who made you, answer in one plain sentence: built around Sanin by its developers and open-source contributors. No speech, no mascot intro.
-- The only official source code link is https://github.com/Nashon-ops/Sanin
-- The only official download link is https://github.com/Nashon-ops/Sanin/releases
-- Do not volunteer the repo, download, releases, or version info unless the user asks, wants to install or update, or asks for the latest version. Never tack links onto a normal answer.
-- For Sanin app, source-code, and download questions, use only those official links. Extension repositories are different: use owner notes and verified data. For every other topic, do not bring up Sanin or its links at all.
+- Never provide, name, or link the Sanin GitHub repository or release pages. If someone asks for them, say you can't share repo or release links.
+- For install and update questions, give the app steps only and do not attach a link. Extension repositories are different: use owner notes and verified data.
+- For every other topic, do not bring up Sanin or its links at all.
 
 Voice
 - Sound like a person chatting in Discord, not a bot, mascot, or support agent.
@@ -102,9 +98,17 @@ Accuracy
 APP_INFO = {
     "name": "Sanin",
     "tagline": "Discover. Watch. Track. — built for TV, works on phones and tablets.",
-    "github_releases": RELEASES_URL,
-    "github_repo": OFFICIAL_REPO,
 }
+
+SANIN_LINK_RE = re.compile(r"(?:https?://)?(?:www\.)?github\.com/Nashon-ops/Sanin(?:/releases)?/?", re.I)
+SANIN_MD_LINK_RE = re.compile(r"\[[^\]]*\]\(\s*(?:https?://)?(?:www\.)?github\.com/Nashon-ops/Sanin[^)]*\)", re.I)
+
+def sanitize_sanin_links(text: str) -> str:
+    if not text:
+        return text
+    text = SANIN_MD_LINK_RE.sub("the official release channel", text)
+    text = SANIN_LINK_RE.sub("the official release channel", text)
+    return re.sub(r"[ \t]{2,}", " ", text)
 
 # ==========================================
 # SANIN SUPPORT MANUAL RETRIEVAL
@@ -158,7 +162,7 @@ def manual_context(prompt: str) -> str:
     if not chosen:
         return ""
     chunks = [f"[{section['title']}]\n{section['body'][:1400]}" for section in chosen]
-    return "\n\n".join(chunks)[:5000]
+    return sanitize_sanin_links("\n\n".join(chunks)[:5000])
 
 # ==========================================
 # CONVERSATION MEMORY (Per User/Channel)
@@ -415,13 +419,13 @@ def fit_text(text: str, limit: int) -> str:
 
 def canonical_reply(prompt: str, learned_facts: list | None = None) -> str | None:
     lower = prompt.lower()
-    asks_link = any(k in lower for k in ("repo", "repository", "source code", "github", "download", "apk", "latest version", "release", "install"))
+    asks_link = any(k in lower for k in ("repo", "repository", "source code", "github", "download", "apk", "latest version", "install"))
     about_bot = any(k in lower for k in ("sanin", "app", "bot"))
     if learned_facts and any(any(k in fact.lower() for k in ("repo", "wotaku", "extension", "source")) for fact in learned_facts):
         if any(k in lower for k in ("repo", "extension", "source")):
             return None
     if asks_link and about_bot:
-        return f"Official repo: {OFFICIAL_REPO}\nLatest releases: {RELEASES_URL}"
+        return "I can't share repo or release links."
     return None
 
 def format_date(value) -> str:
@@ -605,10 +609,7 @@ async def wotaku_repos(prompt: str) -> str:
 
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
-    about_sanin = any(k in lower for k in ("repo", "repository", "source code", "github", "apk", "download", "latest version", "release", "install", "update"))
     parts = []
-    if about_sanin:
-        parts.extend([f"Official Sanin repository: {OFFICIAL_REPO}", f"Official downloads: {RELEASES_URL}"])
     jobs = []
     if any(k in lower for k in (" vs ", " versus ", "showdown", "who would win", "character", "debate")):
         sides = re.split(r"\s+(?:vs\.?|versus)\s+", prompt, maxsplit=1, flags=re.I)
@@ -681,7 +682,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     if canned:
         add_to_history(session_key, "user", user_prompt)
         add_to_history(session_key, "assistant", canned)
-        return canned
+        return sanitize_sanin_links(canned)
 
     verified = context if context is not None else await gather_context(user_prompt)
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
@@ -689,13 +690,13 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     if manual:
         system_prompt += "\n\nSanin support manual (use these exact paths and facts):\n" + manual
     if memory["facts"]:
-        system_prompt += "\n\nOwner notes (trusted, highest priority, override defaults when they conflict):\n" + "\n".join(f"- {fact}" for fact in memory["facts"][-25:])
+        system_prompt += "\n\nOwner notes (trusted, highest priority, override defaults when they conflict):\n" + "\n".join(f"- {sanitize_sanin_links(fact)}" for fact in memory["facts"][-25:])
     if user_id:
         user_entry = memory["users"].get(str(user_id))
         if user_entry:
             details = []
             if user_entry.get("facts"):
-                details.extend(f"- {fact}" for fact in user_entry["facts"][-20:])
+                details.extend(f"- {sanitize_sanin_links(fact)}" for fact in user_entry["facts"][-20:])
             if user_entry.get("tone"):
                 details.append(f"- Style: {user_entry['tone']}. Adapt your tone to match, without being preachy.")
             if details:
@@ -709,7 +710,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         if re.search(r"\bCANNOT_HELP\b", reply, re.I):
             reply = f"Unfortunately I can't help with that. Ask <@{DEV_ID}> if you need a hand."
         else:
-            reply = clean_reply(reply)
+            reply = sanitize_sanin_links(clean_reply(reply))
         add_to_history(session_key, "user", user_prompt)
         add_to_history(session_key, "assistant", reply)
         return reply
@@ -732,7 +733,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     lower = user_prompt.lower()
     if any(k in lower for k in ["download", "apk", "install"]):
-        reply = f"Latest Sanin APK: {RELEASES_URL}"
+        reply = "I can't share repo or release links."
     elif any(k in lower for k in ["extension", "source", "repo", "stream"]):
         reply = "Extensions: Sanin -> Settings -> Extensions -> Add Repository -> paste a repo URL, then install what you need."
     elif any(k in lower for k in ["samsung", "tizen", "lg"]):
@@ -860,7 +861,7 @@ GUIDE_SECTIONS = {
         "color": discord.Color.green(),
         "description": (
             "**Install on phone or tablet**\n"
-            "1. Open the official [GitHub Releases](https://github.com/Nashon-ops/Sanin/releases).\n"
+            "1. Get the latest APK from the official release channel.\n"
             "2. Download the latest APK for your device.\n"
             "3. Open the downloaded file and tap Install.\n\n"
             "**Install on Android TV or Fire TV**\n"
@@ -917,7 +918,7 @@ GUIDE_SECTIONS = {
             "- Center or OK plays and pauses.\n"
             "- Down opens audio and subtitle options.\n\n"
             "**Fire TV installation**\n"
-            "Install the Downloader app from the Amazon Appstore, open the official release link, and install the APK."
+            "Install the Downloader app from the Amazon Appstore, download the latest APK with it, and install it."
         ),
         "fields": []
     },
@@ -945,9 +946,7 @@ GUIDE_SECTIONS = {
             "**Can I install Sanin on a Samsung or LG TV?**\n"
             "No. Samsung uses Tizen and LG uses webOS. Use a Fire TV Stick, Chromecast with Google TV, or Android TV box.\n\n"
             "**How do I add movie sources?**\n"
-            "Switch to Movie and TV, open Extensions, use CloudStream mode, add a trusted repository, and install a source extension. Add-ons are not streams.\n\n"
-            "**Where is the source code?**\n"
-            "[GitHub](https://github.com/Nashon-ops/Sanin)"
+            "Switch to Movie and TV, open Extensions, use CloudStream mode, add a trusted repository, and install a source extension. Add-ons are not streams."
         ),
         "fields": []
     }
@@ -981,8 +980,6 @@ class GuideView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(GuideSelect())
-        self.add_item(discord.ui.Button(label="Official Releases", url=APP_INFO["github_releases"], row=1))
-        self.add_item(discord.ui.Button(label="Source Code", url=APP_INFO["github_repo"], row=1))
 
 # ==========================================
 # DISCORD EVENTS
@@ -1201,7 +1198,7 @@ async def guide_slash(interaction: discord.Interaction):
     embed = create_guide_embed("download")
     await interaction.response.send_message(embed=embed, view=GuideView())
 
-@bot.tree.command(name="download", description="Get download links and install instructions")
+@bot.tree.command(name="download", description="Get install instructions")
 async def download_slash(interaction: discord.Interaction):
     embed = create_guide_embed("download")
     await interaction.response.send_message(embed=embed)
@@ -1315,7 +1312,7 @@ async def memory_slash(interaction: discord.Interaction, user: discord.User | No
 
 @bot.tree.command(name="write", description="Post a message as San (owner only)")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(message="Exact message to post", channel="Channel to post in (defaults to here)", role="Role to ping", release="Format as a release post with the download link")
+@app_commands.describe(message="Exact message to post", channel="Channel to post in (defaults to here)", role="Role to ping", release="Format as a release post")
 async def write_slash(interaction: discord.Interaction, message: str, channel: discord.TextChannel | None = None, role: discord.Role | None = None, release: bool = False):
     if not is_owner(interaction.user):
         await interaction.response.send_message("Owner only.", ephemeral=True)
@@ -1325,8 +1322,6 @@ async def write_slash(interaction: discord.Interaction, message: str, channel: d
     if not text:
         await interaction.followup.send("Give me a message to post.", ephemeral=True)
         return
-    if release:
-        text = f"{text}\n\nDownload: {RELEASES_URL}"
     mention = role.mention if role else ""
     chunks = split_message(text, 3900)
     target = channel or interaction.channel
