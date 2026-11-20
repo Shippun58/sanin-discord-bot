@@ -1248,6 +1248,7 @@ async def about_slash(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_about_embed())
 
 @bot.tree.command(name="learn", description="Teach San a fact or rule (owner only)")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(fact="What San should remember", user="Store this for a specific user")
 async def learn_slash(interaction: discord.Interaction, fact: str, user: discord.User | None = None):
     if not is_owner(interaction.user):
@@ -1270,6 +1271,7 @@ async def learn_slash(interaction: discord.Interaction, fact: str, user: discord
         await interaction.followup.send("Couldn't save that right now.", ephemeral=True)
 
 @bot.tree.command(name="forget", description="Remove something San learned (owner only)")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(number="Memory number, check with /memory", user="Forget a fact about this user")
 async def forget_slash(interaction: discord.Interaction, number: int, user: discord.User | None = None):
     if not is_owner(interaction.user):
@@ -1312,6 +1314,7 @@ async def memory_slash(interaction: discord.Interaction, user: discord.User | No
         await interaction.followup.send(chunk)
 
 @bot.tree.command(name="write", description="Post a message as San (owner only)")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(message="Exact message to post", channel="Channel to post in (defaults to here)", role="Role to ping", release="Format as a release post with the download link")
 async def write_slash(interaction: discord.Interaction, message: str, channel: discord.TextChannel | None = None, role: discord.Role | None = None, release: bool = False):
     if not is_owner(interaction.user):
@@ -1340,6 +1343,7 @@ async def write_slash(interaction: discord.Interaction, message: str, channel: d
         await interaction.followup.send("Couldn't post that. Check my permissions in the channel.", ephemeral=True)
 
 @bot.tree.command(name="tone", description="Set a user's remembered conversation style (owner only)")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(description="How should San talk to this user?", user="User to set the style for")
 async def tone_slash(interaction: discord.Interaction, description: str, user: discord.User | None = None):
     if not is_owner(interaction.user):
