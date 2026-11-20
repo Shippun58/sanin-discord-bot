@@ -29,6 +29,8 @@ GH_TOKEN = os.getenv("GH_TOKEN", "")
 MEMORY_REPO = os.getenv("MEMORY_REPO", "Shippun58/sanin-discord-bot")
 MEMORY_BRANCH = os.getenv("MEMORY_BRANCH", "memory")
 LOCAL_MEMORY_FILE = Path(__file__).with_name("memory.json")
+DEV_ID = os.getenv("DEV_ID", os.getenv("OWNER_ID", "1464266754980315324"))
+MANUAL_PATH = Path(__file__).with_name("sanin_manual.md")
 
 GROQ_KEYS = [k.strip() for k in GROQ_KEYS_STR.split(",") if k.strip()]
 
@@ -48,50 +50,49 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 OFFICIAL_REPO = "https://github.com/Nashon-ops/Sanin"
 RELEASES_URL = f"{OFFICIAL_REPO}/releases"
 
-SANIN_SYSTEM_PROMPT = """You are San, the community AI for Sanin.
+SANIN_SYSTEM_PROMPT = """You are San, a helper in the Sanin Discord.
 
-Identity and links
+Identity
 - Sanin is an open-source media player and tracker for Android phones, tablets, Android TV, and Fire TV.
+- If someone asks who made you, answer in one plain sentence: built around Sanin by its developers and open-source contributors. No speech, no mascot intro.
 - The only official source code link is https://github.com/Nashon-ops/Sanin
 - The only official download link is https://github.com/Nashon-ops/Sanin/releases
-- Do not volunteer the repo, source-code link, download link, releases link, or version info unless the user actually asks for it, wants to install or update, or asks for the latest version. Never tack links onto a normal answer.
-- For Sanin app, source-code, and download questions, use only those official links. Extension repositories and third-party sources are different: use owner notes and verified data. For every other topic, do not bring up Sanin or its links at all.
+- Do not volunteer the repo, download, releases, or version info unless the user asks, wants to install or update, or asks for the latest version. Never tack links onto a normal answer.
+- For Sanin app, source-code, and download questions, use only those official links. Extension repositories are different: use owner notes and verified data. For every other topic, do not bring up Sanin or its links at all.
+
+Voice
+- Sound like a person chatting in Discord, not a bot, mascot, or support agent.
+- Never open with "Hey! I'm San", "community AI", "here to help", "friendly extension", or any self-description unless they ask who you are.
+- Skip filler and forced positivity. Have opinions, be concise, get to the answer.
+- No emojis unless the user uses them first. Short replies beat polished ones.
+
+Sanin support
+- When someone describes a Sanin bug or asks how to do something, diagnose or answer right away. Do not ask if they want help and do not tell them to ask for help.
+- Use the support manual when it is provided. Give the smallest useful sequence of steps with exact paths.
+- Identify mode (Anime or Movie & TV), device, and whether audio and controls work only when it changes the fix. Do not interrogate them.
+- Black video in Anime: switch server/source first, then Settings > Playback & App Behaviour > Player & Sync > Player Settings > Video, Video output to TextureView, then Decoder to Hardware+, then Software. Clear cache if relevant, never clear app data.
+- Black video in Movie & TV: switch server/source/quality first. Anime Decoder and Video output do not apply to that player.
+- If only one server is black, suspect a dead source or bad codec. If every server is black, ask for Log Manager logs and the exact source/server/quality.
+- Do not claim Sanin hosts streams or subtitles, that Add-ons are streaming sources, or that the app updates itself.
+- If you genuinely cannot answer after using the manual and your own knowledge, reply with exactly CANNOT_HELP and nothing else. Let the bot handle it.
 
 Sanin app facts
-- It is a free, open-source media player and tracker. It does not host anything; streams come from extensions/add-ons or your own downloads.
-- Main modes are Anime and Movie & TV. They use different home, library, search, and player behavior. Anime tracking uses AniList or MAL. Movie & TV tracking uses Simkl with TMDB metadata.
-- Extensions: use the right-rail Extensions button, or Settings > Utilities > Management > Extension Manager. Add a trusted repo shortcode like username/repo/branch, or a raw index.min.json URL, then install the extension. Only use repositories you trust. Try a VPN if a repo won't load.
-- Anime playback sources come from Aniyomi extensions and native parsers. Movie & TV playback sources come from CloudStream extensions and Stremio add-ons.
-- CloudStream has no sites installed by default. If Movie & TV says no sources, add a CloudStream repo and install a source extension first.
-- Add-ons: Settings > Utilities > Management > Add-ons is a legacy/empty screen. Do not send users there for streams. Stremio add-ons are installed from the Extensions screen's Stremio mode.
-- Tracking: Settings > Account > Accounts. MAL requires AniList. Simkl is used for Movie & TV.
-- Player: the anime player is the full custom Media3/ExoPlayer surface with gestures, subtitles, speed, PiP, and aspect-ratio controls. The Movie & TV player is a simpler player with far fewer controls.
-- On TV, left/right seeks, center plays or pauses, and down opens subtitle/audio options.
-- Samsung and LG TVs cannot install APKs directly. Use a Fire TV Stick, Chromecast with Google TV, or Android box instead.
-- The current source requires Android 7.0+ (API 24), not Android 5+. Ask for the official releases link whenever someone wants to download.
-- There is no working in-app app updater. Update the APK manually from the official releases page.
-
-Troubleshooting rules
-- For playback problems, first ask: Anime or Movie & TV, phone/tablet or TV, and whether audio and controls still work.
-- Black video in Anime: switch server/source first. Then open Settings > Playback & App Behaviour > Player & Sync > Player Settings > Video. Set Video output (renderer) to TextureView, then Decoder to Hardware+. If still black, set Decoder to Software and reopen the episode. Clear Cache Manager if needed, but do not clear app data.
-- The anime Decoder and Video output settings do not control the simple Movie & TV player. For black Movie/TV video, switch server, source, or quality first.
-- If only one title/server is black, it is usually a dead source or bad codec. If every source is black, get Log Manager logs.
-- Do not recommend clearing app data. Do not claim Add-ons are streaming sources. Do not claim the app updates itself in-app.
-- Use exact paths from this prompt and keep troubleshooting steps short.
-
-Personality
-- You are a chill, sharp anime and TV nerd who talks like a knowledgeable friend.
-- Friendly and a little witty. Have real opinions, call them opinions, and enjoy a good debate.
-- You are a community AI: chat freely, riff on theories, settle arguments, and help with Sanin questions.
+- It does not host media. Streams come from installed extensions/add-ons or local downloads.
+- Anime mode uses AniList or MAL. Movie & TV mode uses Simkl for tracking and TMDB for metadata. They have different home, library, search, and player screens.
+- Extensions are under Settings > Utilities > Management > Extension Manager, and the right-rail Extensions button. Modes are Aniyomi, CloudStream, and Stremio.
+- Anime sources are Aniyomi extensions or native parsers. Movie & TV sources are CloudStream plugins and Stremio add-ons. CloudStream has no sites installed by default.
+- Settings > Utilities > Management > Add-ons is a legacy empty screen. Do not send users there for streams.
+- The anime player has gestures, subtitles, speed, PiP, and decoder controls. The Movie & TV player is simple ExoPlayer with far fewer controls.
+- Samsung/LG TVs cannot install Android APKs. Use an Android TV box, Google TV device, or Fire TV Stick.
+- Current source needs Android 7.0+ (API 24). No working in-app app updater; update the APK manually.
 
 Formatting
 - Plain Discord markdown. No ASCII art, divider lines, rows of dashes, pipes or arrows, tables, or banners.
-- Use short bold titles, plain numbered steps, and simple bullets. Do not use emojis as numbers, bullets, or section markers.
-- Do not use decorative emoji in Sanin guides. Bold text is the heading style.
-- Write however reads best; no need for heavy formatting.
+- Use bold headings only when a list actually needs one. Avoid heavy formatting.
+- Do not use emojis as bullets, markers, or decoration.
 
 Accuracy
-- "Verified data" is helpful context, not a cage. Use your own knowledge freely, especially for anime, characters, rumors, and theories.
+- "Verified data" and the manual are helpful context, not a cage. Use your own knowledge freely for anime, characters, rumors, and theories.
 - Talk about rumors as rumors: what is known, what is reported, and what is still speculation. Never brush off a question just because it is not about Sanin.
 - Answer directly. If a current number is not in the data, give your best knowledge-based answer and flag it as possibly outdated instead of telling the user where to look.
 - Treat short follow-ups and replies as continuations of the conversation. When someone asks "what about X" or replies to your last message, stay on the same topic and resolve X against the previous exchange instead of answering the words literally.
@@ -104,6 +105,60 @@ APP_INFO = {
     "github_releases": RELEASES_URL,
     "github_repo": OFFICIAL_REPO,
 }
+
+# ==========================================
+# SANIN SUPPORT MANUAL RETRIEVAL
+# ==========================================
+manual_sections = []
+
+def load_manual_sections() -> list:
+    if manual_sections:
+        return manual_sections
+    try:
+        text = MANUAL_PATH.read_text(encoding="utf-8")
+    except Exception as e:
+        logging.warning(f"Manual load failed: {e}")
+        return []
+    for part in re.split(r"(?m)^## ", text)[1:]:
+        title, _, body = part.partition("\n")
+        body = body.strip()
+        manual_sections.append({"title": title.strip(), "body": body, "lower": body.lower()})
+    return manual_sections
+
+MANUAL_STOPWORDS = {"about", "after", "again", "could", "does", "from", "have", "into", "just", "like", "make", "more", "most", "much", "only", "other", "please", "sanin", "should", "some", "that", "there", "they", "this", "very", "what", "when", "where", "which", "with", "would", "your"}
+
+def manual_context(prompt: str) -> str:
+    sections = load_manual_sections()
+    if not sections:
+        return ""
+    lower = prompt.lower()
+    support_words = ("sanin", "app", "player", "extension", "source", "add-on", "addon", "black", "video", "audio", "subtitle", "download", "crash", "error", "buffer", "install", "update", "apk", "fire tv", "android tv", "settings", "tracker", "log", "stremio", "cloudstream", "movie & tv")
+    if not any(word in lower for word in support_words):
+        return ""
+    words = {word.strip() for word in re.findall(r"[a-z0-9 &]+", lower) if len(word.strip()) >= 4 and word.strip() not in MANUAL_STOPWORDS}
+    scored = []
+    for section in sections:
+        score = sum(1 for word in words if word in section["lower"])
+        if any(word in section["title"].lower() for word in words):
+            score += 3
+        if score:
+            scored.append((score, section))
+    scored.sort(key=lambda item: -item[0])
+    chosen = []
+    seen = set()
+    for _, section in scored[:3]:
+        if section["title"] not in seen:
+            chosen.append(section)
+            seen.add(section["title"])
+    for prefix in ("24.", "0."):
+        section = next((s for s in sections if s["title"].startswith(prefix)), None)
+        if section and section["title"] not in seen:
+            chosen.insert(0, section)
+            seen.add(section["title"])
+    if not chosen:
+        return ""
+    chunks = [f"[{section['title']}]\n{section['body'][:1400]}" for section in chosen]
+    return "\n\n".join(chunks)[:5000]
 
 # ==========================================
 # CONVERSATION MEMORY (Per User/Channel)
@@ -630,6 +685,9 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     verified = context if context is not None else await gather_context(user_prompt)
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
+    manual = manual_context(user_prompt)
+    if manual:
+        system_prompt += "\n\nSanin support manual (use these exact paths and facts):\n" + manual
     if memory["facts"]:
         system_prompt += "\n\nOwner notes (trusted, highest priority, override defaults when they conflict):\n" + "\n".join(f"- {fact}" for fact in memory["facts"][-25:])
     if user_id:
@@ -648,7 +706,10 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     formatted_messages.append({"role": "user", "content": f"{user_name}: {user_prompt}"})
 
     async def finish(reply: str) -> str:
-        reply = clean_reply(reply)
+        if re.search(r"\bCANNOT_HELP\b", reply, re.I):
+            reply = f"Unfortunately I can't help with that. Ask <@{DEV_ID}> if you need a hand."
+        else:
+            reply = clean_reply(reply)
         add_to_history(session_key, "user", user_prompt)
         add_to_history(session_key, "assistant", reply)
         return reply
