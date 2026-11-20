@@ -54,17 +54,29 @@ Identity and links
 - Sanin is an open-source media player and tracker for Android phones, tablets, Android TV, and Fire TV.
 - The only official source code link is https://github.com/Nashon-ops/Sanin
 - The only official download link is https://github.com/Nashon-ops/Sanin/releases
-- For Sanin questions, use only those official links. For every other topic, do not bring up Sanin or its links at all.
+- For Sanin app, source-code, and download questions, use only those official links. Extension repositories and third-party sources are different: use owner notes and verified data. For every other topic, do not bring up Sanin or its links at all.
 
 Sanin app facts
-- It is a free, open-source media player and tracker. It does not host anything; streams come from extensions and add-ons you install.
-- Extensions: Settings > Extensions > Add Repository. Paste a trusted repo shortcode like username/repo/branch, or a raw index.min.json URL. Anime, manga, and novel repositories are separate. Then install the extension you want. Only use repositories you trust, and try a VPN if a repo won't load.
-- Movies and TV: open Movies or TV from home, pick a title, then Play Movie. If it says no sources installed, go back to Settings > Extensions > Add Repository and install a CloudStream source repo first.
-- Add-ons: Settings > Add-ons > Install Add-on for extra features like downloaders. Add-ons are not the same as streaming sources.
-- Tracking: link AniList, MyAnimeList, or Simkl under Settings > Accounts.
-- Player: Media3 ExoPlayer with subtitles, speed control, PiP, and aspect-ratio options. On TV, left/right seeks, center plays or pauses, and down opens subtitle/audio options.
+- It is a free, open-source media player and tracker. It does not host anything; streams come from extensions/add-ons or your own downloads.
+- Main modes are Anime and Movie & TV. They use different home, library, search, and player behavior. Anime tracking uses AniList or MAL. Movie & TV tracking uses Simkl with TMDB metadata.
+- Extensions: use the right-rail Extensions button, or Settings > Utilities > Management > Extension Manager. Add a trusted repo shortcode like username/repo/branch, or a raw index.min.json URL, then install the extension. Only use repositories you trust. Try a VPN if a repo won't load.
+- Anime playback sources come from Aniyomi extensions and native parsers. Movie & TV playback sources come from CloudStream extensions and Stremio add-ons.
+- CloudStream has no sites installed by default. If Movie & TV says no sources, add a CloudStream repo and install a source extension first.
+- Add-ons: Settings > Utilities > Management > Add-ons is a legacy/empty screen. Do not send users there for streams. Stremio add-ons are installed from the Extensions screen's Stremio mode.
+- Tracking: Settings > Account > Accounts. MAL requires AniList. Simkl is used for Movie & TV.
+- Player: the anime player is the full custom Media3/ExoPlayer surface with gestures, subtitles, speed, PiP, and aspect-ratio controls. The Movie & TV player is a simpler player with far fewer controls.
+- On TV, left/right seeks, center plays or pauses, and down opens subtitle/audio options.
 - Samsung and LG TVs cannot install APKs directly. Use a Fire TV Stick, Chromecast with Google TV, or Android box instead.
-- Android 5+ is supported. Ask for the official releases link whenever someone wants to download.
+- The current source requires Android 7.0+ (API 24), not Android 5+. Ask for the official releases link whenever someone wants to download.
+- There is no working in-app app updater. Update the APK manually from the official releases page.
+
+Troubleshooting rules
+- For playback problems, first ask: Anime or Movie & TV, phone/tablet or TV, and whether audio and controls still work.
+- Black video in Anime: switch server/source first. Then open Settings > Playback & App Behaviour > Player & Sync > Player Settings > Video. Set Video output (renderer) to TextureView, then Decoder to Hardware+. If still black, set Decoder to Software and reopen the episode. Clear Cache Manager if needed, but do not clear app data.
+- The anime Decoder and Video output settings do not control the simple Movie & TV player. For black Movie/TV video, switch server, source, or quality first.
+- If only one title/server is black, it is usually a dead source or bad codec. If every source is black, get Log Manager logs.
+- Do not recommend clearing app data. Do not claim Add-ons are streaming sources. Do not claim the app updates itself in-app.
+- Use exact paths from this prompt and keep troubleshooting steps short.
 
 Personality
 - You are a chill, sharp anime and TV nerd who talks like a knowledgeable friend.
@@ -343,10 +355,13 @@ def fit_text(text: str, limit: int) -> str:
         cut = limit - 1
     return text[:cut].rstrip() + "…"
 
-def canonical_reply(prompt: str) -> str | None:
+def canonical_reply(prompt: str, learned_facts: list | None = None) -> str | None:
     lower = prompt.lower()
     asks_link = any(k in lower for k in ("repo", "repository", "source code", "github", "download", "apk", "link", "official"))
     about_bot = any(k in lower for k in ("sanin", "app", "bot"))
+    if learned_facts and any(any(k in fact.lower() for k in ("repo", "wotaku", "extension", "source")) for fact in learned_facts):
+        if any(k in lower for k in ("repo", "extension", "source")):
+            return None
     if asks_link and about_bot:
         return f"Official repo: {OFFICIAL_REPO}\nLatest releases: {RELEASES_URL}"
     return None
@@ -489,9 +504,50 @@ def compact_tmdb(items: list) -> list:
         })
     return out
 
+async def wotaku_repos(prompt: str) -> str:
+    lower = prompt.lower()
+    if "stremio" in lower:
+        categories = ["stremio"]
+    elif "novel" in lower:
+        categories = ["lnreader", "ireader"]
+    elif "manga" in lower:
+        categories = ["mihon"]
+    elif any(k in lower for k in ("anime", "movie", "live action", "source", "cloudstream", "sanin")):
+        categories = ["cloudstream", "aniyomi"]
+    else:
+        categories = ["cloudstream", "aniyomi"]
+    lines = []
+    for category in categories:
+        url = f"https://raw.githubusercontent.com/wotakumoe/wotaku/main/docs/ext/{category}.md"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        continue
+                    text = await resp.text()
+        except Exception as e:
+            logging.warning(f"Wotaku lookup failed for {category}: {e}")
+            continue
+        name = ""
+        source_url = ""
+        for line in text.splitlines():
+            if line.startswith("== "):
+                name = line[3:].strip()
+                source_url = ""
+            elif line.startswith("- url:") and name:
+                source_url = line.split(":", 1)[1].strip()
+            elif line.startswith("- raw:") and name:
+                raw_url = line.split(":", 1)[1].strip()
+                lines.append(f"{name} ({category}): {raw_url} | {source_url}")
+                name = ""
+                source_url = ""
+    if not lines:
+        return "Wotaku wiki had no matching extension repo list."
+    return "Wotaku wiki extension repos: " + "; ".join(lines[:8])
+
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
-    about_sanin = any(k in lower for k in ("sanin", "apk", "download", "repo", "github", "extension", "fire tv", "android tv", "install", "app "))
+    about_sanin = any(k in lower for k in ("sanin", "apk", "download", "github", "fire tv", "android tv", "install", "app "))
     parts = []
     if about_sanin:
         parts.extend([f"Official Sanin repository: {OFFICIAL_REPO}", f"Official downloads: {RELEASES_URL}"])
@@ -507,6 +563,8 @@ async def gather_context(prompt: str) -> str:
         title = extract_title(prompt)
         if len(title) >= 2:
             jobs.append(("wiki", wiki_search(title)))
+            if any(k in lower for k in ("repo", "extension", "source")) and not any(k in lower for k in ("source code", "github repo")):
+                jobs.append(("wotaku", wotaku_repos(lower)))
             if any(k in lower for k in ("anime", "manga", "show", "movie", "series", "release", "air", "episode", "episodes", "chapter", "chapters", "how many", "score", "compare", "better", "season", "when", "rumor", "rumour", "leak", "form", "next", "long")):
                 jobs.append(("anilist_anime", anilist_search(title, "ANIME")))
                 jobs.append(("anilist_manga", anilist_search(title, "MANGA")))
@@ -533,6 +591,8 @@ async def gather_context(prompt: str) -> str:
             parts.append(f"TMDB {name.split('_', 1)[1]}: " + json.dumps(compact_tmdb(result), ensure_ascii=False))
         elif name == "wiki" and result:
             parts.append("Wikipedia: " + json.dumps(result, ensure_ascii=False))
+        elif name == "wotaku" and result:
+            parts.append(result)
     return "\n".join(parts) if parts else "No preloaded data for this topic; answer from your own knowledge."
 
 async def query_gemini(api_key: str, messages: list) -> str:
@@ -558,7 +618,8 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     global groq_key_index
 
     session_key = f"{channel_id}:{user_id or user_name}"
-    canned = canonical_reply(user_prompt)
+    memory = await load_memory()
+    canned = canonical_reply(user_prompt, memory["facts"])
     if canned:
         add_to_history(session_key, "user", user_prompt)
         add_to_history(session_key, "assistant", canned)
@@ -566,9 +627,8 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     verified = context if context is not None else await gather_context(user_prompt)
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
-    memory = await load_memory()
     if memory["facts"]:
-        system_prompt += "\n\nOwner notes (trusted, apply them whenever relevant):\n" + "\n".join(f"- {fact}" for fact in memory["facts"][-25:])
+        system_prompt += "\n\nOwner notes (trusted, highest priority, override defaults when they conflict):\n" + "\n".join(f"- {fact}" for fact in memory["facts"][-25:])
     if user_id:
         user_entry = memory["users"].get(str(user_id))
         if user_entry:
@@ -746,7 +806,7 @@ GUIDE_SECTIONS = {
         ),
         "fields": [
             ("Supported Platforms", "• Android Phones & Tablets\n• Android TV / Google TV\n• Amazon Fire TV / Firestick", True),
-            ("Minimum Android Version", "Android 5.0+ (API 21+)", True),
+            ("Minimum Android Version", "Android 7.0+ (API 24+)", True),
         ]
     },
     "extensions": {
@@ -755,11 +815,12 @@ GUIDE_SECTIONS = {
         "description": (
             "Sanin is an open-source media player and tracker. It **does not host or provide streams** itself.\n\n"
             "**How to Add Extensions:**\n"
-            "1. Open **Sanin** and go to **Settings** → **Extensions**.\n"
-            "2. Tap **Add Repository** and enter a trusted repo shortcode like `username/repo/branch`, or a raw `index.min.json` URL.\n"
-            "3. Browse the list and install the extension(s) for your preferred sources. Anime, manga, and novel repos are separate.\n"
-            "4. When you select a title, Sanin uses your installed extension to resolve video streams.\n\n"
-            "💡 *Only add repos you trust. If a repo won't load, try a VPN. If a stream buffers, switch server or update the extension.*"
+            "1. Open **Sanin** and use the right-rail **Extensions** button, or go to **Settings** → **Utilities** → **Management** → **Extension Manager**.\n"
+            "2. Choose the mode: **Aniyomi** for anime, **CloudStream** for Movies/TV, or **Stremio** for add-ons.\n"
+            "3. Tap **Add Repository** and enter a trusted repo shortcode like `username/repo/branch`, or a raw `index.min.json` URL.\n"
+            "4. Browse the list and install the extension(s) you want. CloudStream has no sites by default.\n"
+            "5. Return to the title and pick a source/server.\n\n"
+            "💡 *Only add repos you trust. The Add-ons screen is legacy/empty, not a stream source. If a repo won't load, try a VPN. If a stream buffers, switch server or update the extension.*"
         ),
         "fields": []
     },
@@ -768,11 +829,12 @@ GUIDE_SECTIONS = {
         "color": discord.Color.gold(),
         "description": (
             "**How to watch a movie:**\n"
-            "1. Open **Movies** or **TV** from the home screen and pick a title.\n"
-            "2. Tap **Play Movie**.\n"
-            "3. If it says *No CloudStream sources installed*, go to **Settings** → **Extensions** → **Add Repository**, add a trusted source repo, and install a source extension.\n"
+            "1. Switch to **Movie & TV** mode and pick a title.\n"
+            "2. Tap **Play Movie** or choose an episode.\n"
+            "3. If it says *No CloudStream sources installed*, use the right-rail **Extensions** button or **Settings** → **Utilities** → **Management** → **Extension Manager**. Switch to **CloudStream**, add a trusted repo, and install a source extension.\n"
             "4. Go back to the title and play again. Switch servers or extensions if a stream fails.\n\n"
-            "**Add-ons** under **Settings** → **Add-ons** → **Install Add-on** are for extra features like downloaders, not for movie streams."
+            "**Black video on Movies/TV?** Switch server/source/quality first. The simple Movie/TV player does not use the anime Decoder and Video output settings.\n\n"
+            "**Add-ons** under **Settings** → **Utilities** → **Management** → **Add-ons** are legacy/empty. Stremio add-ons are installed in the Extensions screen's Stremio mode."
         ),
         "fields": []
     },
@@ -795,7 +857,7 @@ GUIDE_SECTIONS = {
             "• **AniList:** Sync anime watchlist, scores, and episode progress.\n"
             "• **MyAnimeList (MAL):** Connect your MAL profile for synchronized anime tracking.\n"
             "• **Simkl:** Sync anime, movies, and TV show watch history seamlessly.\n\n"
-            "**To connect:** Go to **Settings** → **Accounts** in the Sanin app."
+            "**To connect:** Go to **Settings** → **Account** → **Accounts** in the Sanin app. MAL requires AniList."
         ),
         "fields": []
     },
@@ -803,12 +865,14 @@ GUIDE_SECTIONS = {
         "title": "❓ Frequently Asked Questions (FAQ)",
         "color": discord.Color.teal(),
         "description": (
+            "**Q: Why is my video black?**\n"
+            "A: For Anime, switch server/source first. Then open Settings → Playback & App Behaviour → Player & Sync → Player Settings → Video. Set Video output to TextureView, then Decoder to Hardware+, then Software. Reopen the episode. For Movies/TV, switch server/source/quality first because the simple Movie/TV player does not use those anime decoder settings.\n\n"
             "**Q: Why doesn't a video play?**\n"
             "A: Sanin doesn't host media. If a stream doesn't load, switch to another server or extension.\n\n"
             "**Q: Can I install Sanin on Samsung or LG TV?**\n"
             "A: No, Samsung uses Tizen and LG uses webOS. You can plug in a Firestick or Chromecast with Google TV.\n\n"
             "**Q: How do I watch movies or add a movie source?**\n"
-            "A: Open Movies, tap Play Movie, and if there's no source go to Settings → Extensions → Add Repository and install a trusted source repo. Add-ons are for extra features, not streams.\n\n"
+            "A: Switch to Movie & TV, tap Play Movie, and if there's no source add a trusted CloudStream repo in Extensions and install a source extension. Add-ons are not streams.\n\n"
             "**Q: Where is the source code?**\n"
             "A: It's open-source on [GitHub](https://github.com/Nashon-ops/Sanin)."
         ),
