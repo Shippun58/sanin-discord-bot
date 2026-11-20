@@ -5,7 +5,8 @@
     "when user asks about a show pls search it first ie search on tmdb and anilist and give from one not both",
     "sync is on player not setting",
     "stop sending github repo url /release unless asked pls don't",
-    "<@1527953814139834368> Is an owner too"
+    "<@1527953814139834368> Is an owner too",
+    "by typing repo user means content repo, anime /movie not official app repo url /releases so stop spamming"
   ],
   "users": {
     "999": {
