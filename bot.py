@@ -47,7 +47,7 @@ Identity and links
 - Sanin is an open-source media player and tracker for Android phones, tablets, Android TV, and Fire TV.
 - The only official source code link is https://github.com/Nashon-ops/Sanin
 - The only official download link is https://github.com/Nashon-ops/Sanin/releases
-- Never invent URLs. Never mention or link another repository, codename, private or anonymous project, invite, or channel. If you do not have an official link for something, say so plainly.
+- For Sanin questions, use only those official links. For every other topic, do not bring up Sanin or its links at all.
 
 Personality
 - You are a chill, sharp anime and TV nerd who talks like a knowledgeable friend.
@@ -59,9 +59,10 @@ Formatting
 - Write however reads best; no need for heavy formatting.
 
 Accuracy
-- Use the "Verified data" block when current facts, dates, scores, or links matter.
-- You can reason freely from your own knowledge for opinions, theories, and character debates; say when you are unsure.
-- Never fabricate a link or present a guessed release date as fact. The official links above are the only Sanin links.
+- "Verified data" is helpful context, not a cage. Use your own knowledge freely, especially for anime, characters, rumors, and theories.
+- Talk about rumors as rumors: what is known, what is reported, and what is still speculation. Never brush off a question just because it is not about Sanin.
+- Answer directly. If a current number is not in the data, give your best knowledge-based answer and flag it as possibly outdated instead of telling the user where to look.
+- Never fabricate a link or present a guessed release date as fact.
 """
 
 APP_INFO = {
@@ -95,7 +96,7 @@ async def query_groq(api_key: str, model: str, messages: list) -> str:
         "model": model,
         "messages": messages,
         "temperature": 0.7,
-        "max_tokens": 1200
+        "max_tokens": 2048
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -109,9 +110,9 @@ async def query_groq(api_key: str, model: str, messages: list) -> str:
             err_text = await resp.text()
             raise Exception(f"Groq error {resp.status}: {err_text[:120]}")
 
-ANILIST_QUERY = """query ($q: String) {
+ANILIST_QUERY = """query ($q: String, $type: MediaType) {
   Page(perPage: 3) {
-    media(search: $q, type: ANIME) {
+    media(search: $q, type: $type) {
       title { romaji english }
       averageScore popularity episodes status format siteUrl
       nextAiringEpisode { airingAt episode }
@@ -150,7 +151,34 @@ def clean_reply(text: str) -> str:
     text = re.sub(r"\|-{3,}>?", "", text)
     text = re.sub(r"(?:[-=~*_]\s*){5,}", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()[:1900]
+    return text.strip()
+
+def split_message(text: str, limit: int = 1900) -> list[str]:
+    text = text.strip()
+    if not text:
+        return []
+    chunks = []
+    while len(text) > limit:
+        cut = text.rfind("\n\n", 0, limit)
+        if cut < limit // 2:
+            cut = text.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = text.rfind(" ", 0, limit)
+        if cut < 1:
+            cut = limit
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+def fit_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text.rfind(" ", 0, limit - 1)
+    if cut < limit // 2:
+        cut = limit - 1
+    return text[:cut].rstrip() + "…"
 
 def canonical_reply(prompt: str) -> str | None:
     lower = prompt.lower()
@@ -171,13 +199,13 @@ def format_date(value) -> str:
 def extract_title(prompt: str) -> str:
     text = re.sub(r"^(hey|hi|hello|san)\b[,\s]+", "", prompt.strip(), flags=re.I)
     text = re.sub(r"[?].*$", "", text)
-    leading = r"^(who would win|who wins|would win|what|when|who|how|is|are|does|do|can|could|would|should|win|wins|winner|stronger|better|tell me about|info on|information on|estimate|release date of|created|made by|the|a|an|of)\b[\s:]*"
+    leading = r"^(who would win|who wins|would win|rumors of|rumour of|rumors about|rumours about|rumors|rumours|leaks on|leak of|news on|news about|what do you think about|do you think about|what about|thoughts on|what|when|who|how many|how much|how|many|much|episodes|episode|chapters|chapter|volumes|volume|is|are|does|do|can|could|would|should|win|wins|winner|stronger|better|tell me about|info on|information on|estimate|release date of|created|made by|the|a|an|of)\b[\s:]*"
     while True:
         updated = re.sub(leading, "", text, flags=re.I)
         if updated == text:
             break
         text = updated
-    text = re.sub(r"\b(release date|air date|next episode|estimated|estimate|release|anime|show|movie|series)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(release date|air date|next episode|estimated|estimate|release|episodes|episode|chapters|chapter|volumes|volume|count|have|has|anime|manga|show|movie|series)\b", " ", text, flags=re.I)
     return " ".join(text.split())[:60]
 
 async def fetch_json(url: str, params: dict | None = None, headers: dict | None = None, timeout: int = 8) -> dict:
@@ -187,8 +215,8 @@ async def fetch_json(url: str, params: dict | None = None, headers: dict | None 
                 raise Exception(f"HTTP {resp.status}")
             return await resp.json(content_type=None)
 
-async def anilist_search(title: str) -> list:
-    payload = {"query": ANILIST_QUERY, "variables": {"q": title}}
+async def anilist_search(title: str, media_type: str = "ANIME") -> list:
+    payload = {"query": ANILIST_QUERY, "variables": {"q": title, "type": media_type}}
     async with aiohttp.ClientSession() as session:
         async with session.post("https://graphql.anilist.co", json=payload, headers={"User-Agent": "SanBot/1.0"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
             if resp.status != 200:
@@ -275,6 +303,8 @@ def compact_anilist(items: list) -> list:
             "score": item.get("averageScore"),
             "popularity": item.get("popularity"),
             "episodes": item.get("episodes"),
+            "chapters": item.get("chapters"),
+            "volumes": item.get("volumes"),
             "status": item.get("status"),
             "next_episode": nxt.get("episode"),
             "next_airing": nxt.get("airingAt"),
@@ -298,7 +328,10 @@ def compact_tmdb(items: list) -> list:
 
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
-    parts = [f"Official Sanin repository: {OFFICIAL_REPO}", f"Official downloads: {RELEASES_URL}"]
+    about_sanin = any(k in lower for k in ("sanin", "apk", "download", "repo", "github", "extension", "fire tv", "android tv", "install", "app "))
+    parts = []
+    if about_sanin:
+        parts.extend([f"Official Sanin repository: {OFFICIAL_REPO}", f"Official downloads: {RELEASES_URL}"])
     jobs = []
     if any(k in lower for k in (" vs ", " versus ", "showdown", "who would win", "character", "debate")):
         sides = re.split(r"\s+(?:vs\.?|versus)\s+", prompt, maxsplit=1, flags=re.I)
@@ -309,13 +342,14 @@ async def gather_context(prompt: str) -> str:
                 jobs.append((f"charwiki:{name}", wiki_search(name)))
     else:
         title = extract_title(prompt)
-        if len(title) >= 3:
-            if any(k in lower for k in ("anime", "show", "movie", "series", "release", "air", "episode", "score", "compare", "better", "season", "when")):
-                jobs.append(("anilist", anilist_search(title)))
+        if len(title) >= 2:
+            jobs.append(("wiki", wiki_search(title)))
+            if any(k in lower for k in ("anime", "manga", "show", "movie", "series", "release", "air", "episode", "episodes", "chapter", "chapters", "how many", "score", "compare", "better", "season", "when", "rumor", "rumour", "leak", "form", "next", "long")):
+                jobs.append(("anilist_anime", anilist_search(title, "ANIME")))
+                jobs.append(("anilist_manga", anilist_search(title, "MANGA")))
                 if TMDB_API_KEY:
-                    jobs.append(("tmdb", tmdb_search(title)))
-            if any(k in lower for k in ("what", "who", "when", "where", "why", "how", "latest", "news", "current", "update", "search")):
-                jobs.append(("wiki", wiki_search(title)))
+                    jobs.append(("tmdb_tv", tmdb_search(title, "tv")))
+                    jobs.append(("tmdb_movie", tmdb_search(title, "movie")))
     if not jobs:
         return "\n".join(parts)
     results = await asyncio.gather(*(job[1] for job in jobs), return_exceptions=True)
@@ -330,13 +364,13 @@ async def gather_context(prompt: str) -> str:
         elif name.startswith("charwiki:"):
             if result:
                 parts.append(f"Character {name.split(':', 1)[1]} via Wikipedia: " + json.dumps(result[:2], ensure_ascii=False))
-        elif name == "anilist" and result:
-            parts.append("AniList: " + json.dumps(compact_anilist(result), ensure_ascii=False))
-        elif name == "tmdb" and result:
-            parts.append("TMDB: " + json.dumps(compact_tmdb(result), ensure_ascii=False))
+        elif name.startswith("anilist_") and result:
+            parts.append(f"AniList {name.split('_', 1)[1]}: " + json.dumps(compact_anilist(result), ensure_ascii=False))
+        elif name.startswith("tmdb_") and result:
+            parts.append(f"TMDB {name.split('_', 1)[1]}: " + json.dumps(compact_tmdb(result), ensure_ascii=False))
         elif name == "wiki" and result:
             parts.append("Wikipedia: " + json.dumps(result, ensure_ascii=False))
-    return "\n".join(parts)
+    return "\n".join(parts) if parts else "No preloaded data for this topic; answer from your own knowledge."
 
 async def query_gemini(api_key: str, messages: list) -> str:
     prompt_text = "\n\n".join(f"{msg['role']}: {msg['content']}" for msg in messages)
@@ -346,7 +380,7 @@ async def query_gemini(api_key: str, messages: list) -> str:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
             payload = {
                 "contents": [{"parts": [{"text": prompt_text}]}],
-                "generationConfig": {"maxOutputTokens": 1200, "temperature": 0.7}
+                "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.7}
             }
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=12)) as resp:
@@ -367,7 +401,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         return canned
 
     verified = context if context is not None else await gather_context(user_prompt)
-    system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (use only this for current facts):\n" + verified
+    system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
     formatted_messages = [{"role": "system", "content": system_prompt}]
     for msg in conversation_history[channel_id]:
         formatted_messages.append(msg)
@@ -420,41 +454,46 @@ def build_about_embed() -> discord.Embed:
     return embed
 
 async def build_release_embed(title: str) -> discord.Embed:
-    anime_task = anilist_search(title)
-    tmdb_task = tmdb_search(title) if TMDB_API_KEY else asyncio.sleep(0, result=[])
-    anime, tv = await asyncio.gather(anime_task, tmdb_task, return_exceptions=True)
+    jobs = [("anime", anilist_search(title, "ANIME")), ("manga", anilist_search(title, "MANGA"))]
+    if TMDB_API_KEY:
+        jobs.extend([("tv", tmdb_search(title, "tv")), ("movie", tmdb_search(title, "movie"))])
+    results = await asyncio.gather(*(job[1] for job in jobs), return_exceptions=True)
+    found = {label: result for (label, _), result in zip(jobs, results) if not isinstance(result, Exception) and result}
     lines = []
-    if not isinstance(anime, Exception) and anime:
-        for item in anime[:2]:
+    for label in ("anime", "manga"):
+        for item in found.get(label, [])[:2]:
             names = item.get("title") or {}
             name = names.get("english") or names.get("romaji") or "Unknown"
             nxt = item.get("nextAiringEpisode") or {}
             status = STATUS_LABELS.get(item.get("status"), item.get("status", "Unknown"))
-            eta = f"Episode {nxt.get('episode')} expected {format_date(nxt.get('airingAt'))}" if nxt.get("airingAt") else f"Status: {status}"
+            if nxt.get("airingAt"):
+                eta = f"Episode {nxt.get('episode')} expected {format_date(nxt.get('airingAt'))}"
+            elif label == "manga":
+                eta = f"{item.get('chapters') or '?'} chapters | {item.get('volumes') or '?'} volumes | {status}"
+            else:
+                eta = f"Status: {status}"
             score = f"{item.get('averageScore')}%" if item.get("averageScore") is not None else "n/a"
-            lines.append(f"**{name}** via AniList\n{eta}\nScore {score} | {item.get('episodes') or '?'} episodes | {item.get('siteUrl')}")
-    if not isinstance(tv, Exception) and tv:
-        details = []
-        for item in tv[:2]:
+            lines.append(f"**{name}** via AniList {label}\n{eta}\nScore {score} | {item.get('siteUrl')}")
+    for label in ("tv", "movie"):
+        for item in found.get(label, [])[:1]:
             try:
-                details.append(await tmdb_details(item))
+                detail = await tmdb_details(item)
             except Exception as e:
                 logging.warning(f"TMDB details failed: {e}")
-        for item in details:
-            name = item.get("name") or item.get("title") or "Unknown"
-            nxt = item.get("next_episode_to_air") or {}
+                continue
+            name = detail.get("name") or detail.get("title") or "Unknown"
+            nxt = detail.get("next_episode_to_air") or {}
             if nxt.get("air_date"):
                 eta = f"Next episode expected {format_date(nxt['air_date'])}"
-            elif item.get("release_date"):
-                eta = f"Released {format_date(item['release_date'])}"
+            elif detail.get("release_date"):
+                eta = f"Released {format_date(detail['release_date'])}"
             else:
-                eta = f"Status: {item.get('status', 'Unknown')}"
-            kind = item.get("_kind", "tv")
-            url = f"https://www.themoviedb.org/{kind}/{item.get('id')}"
-            score = f"{item.get('vote_average')}/10" if item.get("vote_average") is not None else "n/a"
-            lines.append(f"**{name}** via TMDB\n{eta}\nScore {score} | {item.get('status', 'Unknown')} | {url}")
+                eta = f"Status: {detail.get('status', 'Unknown')}"
+            url = f"https://www.themoviedb.org/{label}/{detail.get('id')}"
+            score = f"{detail.get('vote_average')}/10" if detail.get("vote_average") is not None else "n/a"
+            lines.append(f"**{name}** via TMDB {label}\n{eta}\nScore {score} | {detail.get('status', 'Unknown')} | {url}")
     description = "\n\n".join(lines) if lines else "No reliable match found. Try a more specific title."
-    return discord.Embed(title=f"Release estimate: {title}", description=description, color=discord.Color.blurple())
+    return discord.Embed(title=f"Release estimate: {title}", description=fit_text(description, 4000), color=discord.Color.blurple())
 
 async def fetch_character_side(name: str) -> dict:
     jobs = [("anilist", anilist_character(name)), ("wiki", wiki_search(name))]
@@ -498,7 +537,7 @@ async def build_showdown_embed(first: str, second: str, channel_id: int) -> disc
         description += "\n\n" + verdict
     except Exception as e:
         logging.warning(f"Showdown verdict failed: {e}")
-    return discord.Embed(title=f"Showdown: {first} vs {second}", description=description, color=discord.Color.gold())
+    return discord.Embed(title=f"Showdown: {first} vs {second}", description=fit_text(description, 4000), color=discord.Color.gold())
 
 async def build_search_embed(query: str) -> discord.Embed:
     lines = []
@@ -647,7 +686,11 @@ async def on_message(message: discord.Message):
 
         async with message.channel.typing():
             reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean)
-            await message.reply(reply_text)
+            chunks = split_message(reply_text)
+            if chunks:
+                await message.reply(chunks[0])
+                for chunk in chunks[1:]:
+                    await message.channel.send(chunk)
         return
 
     await bot.process_commands(message)
@@ -711,7 +754,11 @@ async def about_prefix_cmd(ctx):
 async def ask_slash(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
     reply = await get_ai_response(interaction.channel_id, interaction.user.display_name, question)
-    await interaction.followup.send(reply)
+    chunks = split_message(reply)
+    if chunks:
+        await interaction.followup.send(chunks[0])
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk)
 
 @bot.tree.command(name="guide", description="Interactive guide for Sanin")
 async def guide_slash(interaction: discord.Interaction):
