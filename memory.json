@@ -1,6 +1,7 @@
 {
   "facts": [
-    "when user asks for repo give them a real repo url, if it's anime repo get from wotaku wiki and give. If movie give cs3 repo and short code and tell users where to get stremio addon"
+    "when user asks for repo give them a real repo url, if it's anime repo get from wotaku wiki and give. If movie give cs3 repo and short code and tell users where to get stremio addon",
+    "also tell user to disable all motions for smooth feel"
   ],
   "users": {
     "999": {
