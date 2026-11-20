@@ -54,6 +54,7 @@ Identity and links
 - Sanin is an open-source media player and tracker for Android phones, tablets, Android TV, and Fire TV.
 - The only official source code link is https://github.com/Nashon-ops/Sanin
 - The only official download link is https://github.com/Nashon-ops/Sanin/releases
+- Do not volunteer the repo, source-code link, download link, releases link, or version info unless the user actually asks for it, wants to install or update, or asks for the latest version. Never tack links onto a normal answer.
 - For Sanin app, source-code, and download questions, use only those official links. Extension repositories and third-party sources are different: use owner notes and verified data. For every other topic, do not bring up Sanin or its links at all.
 
 Sanin app facts
@@ -357,7 +358,7 @@ def fit_text(text: str, limit: int) -> str:
 
 def canonical_reply(prompt: str, learned_facts: list | None = None) -> str | None:
     lower = prompt.lower()
-    asks_link = any(k in lower for k in ("repo", "repository", "source code", "github", "download", "apk", "link", "official"))
+    asks_link = any(k in lower for k in ("repo", "repository", "source code", "github", "download", "apk", "latest version", "release", "install"))
     about_bot = any(k in lower for k in ("sanin", "app", "bot"))
     if learned_facts and any(any(k in fact.lower() for k in ("repo", "wotaku", "extension", "source")) for fact in learned_facts):
         if any(k in lower for k in ("repo", "extension", "source")):
@@ -547,7 +548,7 @@ async def wotaku_repos(prompt: str) -> str:
 
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
-    about_sanin = any(k in lower for k in ("sanin", "apk", "download", "github", "fire tv", "android tv", "install", "app "))
+    about_sanin = any(k in lower for k in ("repo", "repository", "source code", "github", "apk", "download", "latest version", "release", "install", "update"))
     parts = []
     if about_sanin:
         parts.extend([f"Official Sanin repository: {OFFICIAL_REPO}", f"Official downloads: {RELEASES_URL}"])
@@ -675,15 +676,14 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         reply = "Samsung and LG TVs can't install Android APKs directly. Use a Firestick, Chromecast with Google TV, or an Android TV box."
     else:
         reply = f"Hey {user_name}, I'm San. I can help with Sanin, release estimates, character showdowns, and web lookups. Try /guide, /release, /showdown, or /search."
-    add_to_history(channel_id, "user", user_prompt)
-    add_to_history(channel_id, "assistant", reply)
+    add_to_history(session_key, "user", user_prompt)
+    add_to_history(session_key, "assistant", reply)
     return reply
 
 def build_about_embed() -> discord.Embed:
     description = (
         "I'm San, the Sanin community AI. I'm a chill anime and TV nerd who keeps things short, "
-        "settles character debates with data and reasoning, and never invents links or dates.\n\n"
-        "Official repo: " + OFFICIAL_REPO
+        "settles character debates with data and reasoning, and never invents links or dates."
     )
     embed = discord.Embed(title="About San", description=description, color=discord.Color.blurple())
     embed.add_field(name="Commands", value="/guide, /download, /tv, /movies, /faq, /ask, /release, /showdown, /search, /about, /memory", inline=False)
