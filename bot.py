@@ -1326,15 +1326,17 @@ async def write_slash(interaction: discord.Interaction, message: str, channel: d
         await interaction.followup.send("Give me a message to post.", ephemeral=True)
         return
     if release:
-        text = f"**Sanin update**\n\n{text}\n\nDownload: {RELEASES_URL}"
+        text = f"{text}\n\nDownload: {RELEASES_URL}"
     mention = role.mention if role else ""
-    chunks = split_message(text, 1800 if mention else 1900)
+    chunks = split_message(text, 3900)
     target = channel or interaction.channel
     try:
         first = None
         for index, chunk in enumerate(chunks):
-            content = f"{mention}\n{chunk}" if index == 0 and mention else chunk
-            sent = await target.send(content)
+            embed = discord.Embed(description=chunk, color=discord.Color.gold() if release else discord.Color.blurple())
+            if index == 0 and release:
+                embed.title = "Sanin update"
+            sent = await target.send(content=mention if index == 0 and mention else None, embed=embed)
             if first is None:
                 first = sent
         await interaction.followup.send(f"Posted to {target.mention}: {first.jump_url}", ephemeral=True)
