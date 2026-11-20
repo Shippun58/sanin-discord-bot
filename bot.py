@@ -86,6 +86,8 @@ Personality
 
 Formatting
 - Plain Discord markdown. No ASCII art, divider lines, rows of dashes, pipes or arrows, tables, or banners.
+- Use short bold titles, plain numbered steps, and simple bullets. Do not use emojis as numbers, bullets, or section markers.
+- Do not use decorative emoji in Sanin guides. Bold text is the heading style.
 - Write however reads best; no need for heavy formatting.
 
 Accuracy
@@ -793,88 +795,98 @@ async def build_search_embed(query: str) -> discord.Embed:
 # ==========================================
 GUIDE_SECTIONS = {
     "download": {
-        "title": "📥 Download & Installation Guide",
+        "title": "Download and Installation",
         "color": discord.Color.green(),
         "description": (
-            "**Sanin** is available for Android Phones, Tablets, Android TV, and Fire TV devices.\n\n"
-            "**Steps to Install:**\n"
-            "1. Visit [GitHub Releases](https://github.com/Nashon-ops/Sanin/releases).\n"
-            "2. Download the latest `.apk` file for your device.\n"
-            "3. On phone/tablet: open the downloaded APK and tap **Install**.\n"
-            "4. On Android TV / Fire TV: use the **Downloader** app or send the APK via **Send Files to TV**, then install.\n\n"
-            "⚠️ *Note: Samsung TVs (Tizen OS) and LG TVs (webOS) cannot run Android APKs.*"
+            "**Install on phone or tablet**\n"
+            "1. Open the official [GitHub Releases](https://github.com/Nashon-ops/Sanin/releases).\n"
+            "2. Download the latest APK for your device.\n"
+            "3. Open the downloaded file and tap Install.\n\n"
+            "**Install on Android TV or Fire TV**\n"
+            "1. Use the Downloader app, or send the APK with Send Files to TV.\n"
+            "2. Open the APK and install it.\n\n"
+            "**Compatibility**\n"
+            "Sanin requires Android 7.0 or newer. Samsung Tizen and LG webOS TVs cannot install Android APKs."
         ),
         "fields": [
-            ("Supported Platforms", "• Android Phones & Tablets\n• Android TV / Google TV\n• Amazon Fire TV / Firestick", True),
-            ("Minimum Android Version", "Android 7.0+ (API 24+)", True),
+            ("Platforms", "Android phones and tablets\nAndroid TV / Google TV\nAmazon Fire TV / Firestick", True),
+            ("Minimum Android", "7.0+ (API 24+)", True),
         ]
     },
     "extensions": {
-        "title": "🧩 Extensions & Sources Guide",
+        "title": "Extensions and Sources",
         "color": discord.Color.purple(),
         "description": (
-            "Sanin is an open-source media player and tracker. It **does not host or provide streams** itself.\n\n"
-            "**How to Add Extensions:**\n"
-            "1. Open **Sanin** and use the right-rail **Extensions** button, or go to **Settings** → **Utilities** → **Management** → **Extension Manager**.\n"
-            "2. Choose the mode: **Aniyomi** for anime, **CloudStream** for Movies/TV, or **Stremio** for add-ons.\n"
-            "3. Tap **Add Repository** and enter a trusted repo shortcode like `username/repo/branch`, or a raw `index.min.json` URL.\n"
-            "4. Browse the list and install the extension(s) you want. CloudStream has no sites by default.\n"
-            "5. Return to the title and pick a source/server.\n\n"
-            "💡 *Only add repos you trust. The Add-ons screen is legacy/empty, not a stream source. If a repo won't load, try a VPN. If a stream buffers, switch server or update the extension.*"
+            "Sanin does not host or provide streams. Playback depends on the extensions and repositories you add.\n\n"
+            "**Open the extension manager**\n"
+            "Use the right-rail Extensions button, or open Settings > Utilities > Management > Extension Manager.\n\n"
+            "**Add a repository**\n"
+            "1. Choose Aniyomi for anime, CloudStream for Movies and TV, or Stremio for add-ons.\n"
+            "2. Tap Add Repository.\n"
+            "3. Enter a trusted repo shortcode like `username/repo/branch`, or a raw `index.min.json` URL.\n"
+            "4. Install the extension you want, then pick a source or server from the title page.\n\n"
+            "**Important**\n"
+            "CloudStream has no sites installed by default. The Add-ons screen is legacy and empty, so do not install streams there. Only add repositories you trust. If a repo will not load, try a VPN."
         ),
         "fields": []
     },
     "movies": {
-        "title": "🎬 Watching Movies & TV Shows",
+        "title": "Movies and TV",
         "color": discord.Color.gold(),
         "description": (
-            "**How to watch a movie:**\n"
-            "1. Switch to **Movie & TV** mode and pick a title.\n"
-            "2. Tap **Play Movie** or choose an episode.\n"
-            "3. If it says *No CloudStream sources installed*, use the right-rail **Extensions** button or **Settings** → **Utilities** → **Management** → **Extension Manager**. Switch to **CloudStream**, add a trusted repo, and install a source extension.\n"
-            "4. Go back to the title and play again. Switch servers or extensions if a stream fails.\n\n"
-            "**Black video on Movies/TV?** Switch server/source/quality first. The simple Movie/TV player does not use the anime Decoder and Video output settings.\n\n"
-            "**Add-ons** under **Settings** → **Utilities** → **Management** → **Add-ons** are legacy/empty. Stremio add-ons are installed in the Extensions screen's Stremio mode."
+            "**Play a movie or episode**\n"
+            "1. Switch to Movie and TV mode.\n"
+            "2. Pick a title, then tap Play Movie or choose an episode.\n"
+            "3. Switch servers or extensions if a stream fails.\n\n"
+            "**No sources installed**\n"
+            "Open the Extensions screen, switch to CloudStream mode, add a trusted repository, and install a source extension.\n\n"
+            "**Black video**\n"
+            "Switch server, source, or quality first. The simple Movie and TV player does not use the anime Decoder and Video output settings.\n\n"
+            "**Add-ons**\n"
+            "Settings > Utilities > Management > Add-ons is legacy and empty. Stremio add-ons are installed from the Stremio mode of the Extensions screen."
         ),
         "fields": []
     },
     "tv": {
-        "title": "📺 Android TV & Fire TV Navigation",
+        "title": "TV Navigation",
         "color": discord.Color.orange(),
         "description": (
-            "Sanin has a dedicated interface designed for TV screens and remotes:\n\n"
-            "• **D-pad Navigation:** All menus, shelves, and player controls are remote-friendly.\n"
-            "• **Player Controls:** `Left / Right` to seek, `Center / OK` to play/pause, `Down` for audio/subtitles.\n"
-            "• **Fire TV Installation:** Download the 'Downloader' app from the Amazon Appstore, enter the GitHub release link, and install."
+            "**Remote controls**\n"
+            "- Left and right seek.\n"
+            "- Center or OK plays and pauses.\n"
+            "- Down opens audio and subtitle options.\n\n"
+            "**Fire TV installation**\n"
+            "Install the Downloader app from the Amazon Appstore, open the official release link, and install the APK."
         ),
         "fields": []
     },
     "tracking": {
-        "title": "📊 Tracking & Account Integration",
+        "title": "Tracking and Accounts",
         "color": discord.Color.blue(),
         "description": (
-            "Sync your watching progress across services:\n\n"
-            "• **AniList:** Sync anime watchlist, scores, and episode progress.\n"
-            "• **MyAnimeList (MAL):** Connect your MAL profile for synchronized anime tracking.\n"
-            "• **Simkl:** Sync anime, movies, and TV show watch history seamlessly.\n\n"
-            "**To connect:** Go to **Settings** → **Account** → **Accounts** in the Sanin app. MAL requires AniList."
+            "**Services**\n"
+            "- **AniList:** Anime watchlist, scores, and episode progress.\n"
+            "- **MyAnimeList:** Anime tracking through an AniList login.\n"
+            "- **Simkl:** Movie and TV tracking.\n\n"
+            "**Connect an account**\n"
+            "Open Settings > Account > Accounts. MAL requires AniList first."
         ),
         "fields": []
     },
     "faq": {
-        "title": "❓ Frequently Asked Questions (FAQ)",
+        "title": "FAQ and Troubleshooting",
         "color": discord.Color.teal(),
         "description": (
-            "**Q: Why is my video black?**\n"
-            "A: For Anime, switch server/source first. Then open Settings → Playback & App Behaviour → Player & Sync → Player Settings → Video. Set Video output to TextureView, then Decoder to Hardware+, then Software. Reopen the episode. For Movies/TV, switch server/source/quality first because the simple Movie/TV player does not use those anime decoder settings.\n\n"
-            "**Q: Why doesn't a video play?**\n"
-            "A: Sanin doesn't host media. If a stream doesn't load, switch to another server or extension.\n\n"
-            "**Q: Can I install Sanin on Samsung or LG TV?**\n"
-            "A: No, Samsung uses Tizen and LG uses webOS. You can plug in a Firestick or Chromecast with Google TV.\n\n"
-            "**Q: How do I watch movies or add a movie source?**\n"
-            "A: Switch to Movie & TV, tap Play Movie, and if there's no source add a trusted CloudStream repo in Extensions and install a source extension. Add-ons are not streams.\n\n"
-            "**Q: Where is the source code?**\n"
-            "A: It's open-source on [GitHub](https://github.com/Nashon-ops/Sanin)."
+            "**Why is my video black?**\n"
+            "For Anime, switch server or source first. Then open Settings > Playback & App Behaviour > Player & Sync > Player Settings > Video. Set Video output to TextureView, then Decoder to Hardware+, then Software. Reopen the episode. For Movies and TV, switch server, source, or quality first because the simple player does not use those anime decoder settings.\n\n"
+            "**Why does a video fail to play?**\n"
+            "Sanin does not host media. Switch to another server or extension.\n\n"
+            "**Can I install Sanin on a Samsung or LG TV?**\n"
+            "No. Samsung uses Tizen and LG uses webOS. Use a Fire TV Stick, Chromecast with Google TV, or Android TV box.\n\n"
+            "**How do I add movie sources?**\n"
+            "Switch to Movie and TV, open Extensions, use CloudStream mode, add a trusted repository, and install a source extension. Add-ons are not streams.\n\n"
+            "**Where is the source code?**\n"
+            "[GitHub](https://github.com/Nashon-ops/Sanin)"
         ),
         "fields": []
     }
@@ -891,14 +903,14 @@ def create_guide_embed(section_key="download"):
 class GuideSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="Download & Install", value="download", description="How to install on Phone, TV, or Firestick", emoji="📥"),
-            discord.SelectOption(label="Extensions & Sources", value="extensions", description="How to add repos and streaming extensions", emoji="🧩"),
-            discord.SelectOption(label="Movies & TV", value="movies", description="How to add a movie source and play", emoji="🎬"),
-            discord.SelectOption(label="Android TV & Fire TV", value="tv", description="Using Sanin on TV with remote control", emoji="📺"),
-            discord.SelectOption(label="Tracking Accounts", value="tracking", description="Connect AniList, MyAnimeList, or Simkl", emoji="📊"),
-            discord.SelectOption(label="FAQ & Troubleshooting", value="faq", description="Common questions and quick answers", emoji="❓"),
+            discord.SelectOption(label="Download & Install", value="download", description="How to install on phone, TV, or Firestick"),
+            discord.SelectOption(label="Extensions & Sources", value="extensions", description="How to add repos and streaming extensions"),
+            discord.SelectOption(label="Movies & TV", value="movies", description="How to add a movie source and play"),
+            discord.SelectOption(label="Android TV & Fire TV", value="tv", description="Using Sanin on TV with remote control"),
+            discord.SelectOption(label="Tracking Accounts", value="tracking", description="Connect AniList, MyAnimeList, or Simkl"),
+            discord.SelectOption(label="FAQ & Troubleshooting", value="faq", description="Common questions and quick answers"),
         ]
-        super().__init__(placeholder="👉 Choose a topic to explore...", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Choose a topic to explore", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         embed = create_guide_embed(self.values[0])
@@ -908,8 +920,8 @@ class GuideView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(GuideSelect())
-        self.add_item(discord.ui.Button(label="GitHub Releases", url=APP_INFO["github_releases"], emoji="📦", row=1))
-        self.add_item(discord.ui.Button(label="Source Code", url=APP_INFO["github_repo"], emoji="💻", row=1))
+        self.add_item(discord.ui.Button(label="Official Releases", url=APP_INFO["github_releases"], row=1))
+        self.add_item(discord.ui.Button(label="Source Code", url=APP_INFO["github_repo"], row=1))
 
 # ==========================================
 # DISCORD EVENTS
