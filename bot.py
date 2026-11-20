@@ -163,6 +163,22 @@ def load_manual_sections() -> list:
 
 MANUAL_STOPWORDS = {"about", "after", "again", "could", "does", "from", "have", "into", "just", "like", "make", "more", "most", "much", "only", "other", "please", "sanin", "should", "some", "that", "there", "they", "this", "very", "what", "when", "where", "which", "with", "would", "your"}
 
+MANUAL_RULES = (
+    ("19.", r"\b(logs?|logging|diagnostics?)\b"),
+    ("11.", r"\b(extensions?|add-?ons?|plugins?|repos?|repositories?|aniyomi|cloudstream|stremio)\b"),
+    ("12.", r"\b(downloads?|offline)\b"),
+    ("14.", r"\b(audio|sound|voice|subtitles?|subs|captions?|sync)\b"),
+    ("13.", r"\b(black|video|player|playback|decoder|buffer|stutter|server|quality)\b"),
+    ("17.", r"\b(slow|lag|performance|animations?|motion|appearance|theme|blur|oled)\b"),
+    ("18.", r"\b(network|dns|proxy|vpn|backup|restore)\b"),
+    ("20.", r"\b(fire ?tv|firestick|android tv|remote)\b"),
+    ("15.", r"\b(account|tracker|tracking|mal|anilist|comments?)\b"),
+    ("16.", r"\b(notifications?|subscriptions?|subscribe)\b"),
+    ("21.", r"\b(trailers?|reels?)\b"),
+    ("1.", r"\b(install|installation|first launch|apk|update)\b"),
+    ("22.", r"\b(crash|crash(es|ing)?|error)\b"),
+)
+
 def manual_context(prompt: str) -> str:
     sections = load_manual_sections()
     if not sections:
@@ -171,26 +187,31 @@ def manual_context(prompt: str) -> str:
     support_words = ("sanin", "player", "extension", "source", "add-on", "addon", "black", "video", "audio", "subtitle", "crash", "error", "buffer", "install", "update", "apk", "fire tv", "android tv", "settings", "tracker", "log", "stremio", "cloudstream", "movie & tv")
     if not any(word in lower for word in support_words):
         return ""
-    words = {word.strip() for word in re.findall(r"[a-z0-9 &]+", lower) if len(word.strip()) >= 4 and word.strip() not in MANUAL_STOPWORDS}
-    scored = []
-    for section in sections:
-        score = sum(1 for word in words if word in section["lower"])
-        if any(word in section["title"].lower() for word in words):
-            score += 3
-        if score:
-            scored.append((score, section))
-    scored.sort(key=lambda item: -item[0])
     chosen = []
     seen = set()
-    for _, section in scored[:2]:
-        if section["title"] not in seen:
+    for prefix, pattern in MANUAL_RULES:
+        if not re.search(pattern, lower):
+            continue
+        section = next((s for s in sections if s["title"].startswith(prefix)), None)
+        if section and section["title"] not in seen:
             chosen.append(section)
             seen.add(section["title"])
+        if len(chosen) >= 2:
+            break
+    if not chosen:
+        words = {word for word in re.findall(r"[a-z0-9]+", lower) if len(word) >= 4 and word not in MANUAL_STOPWORDS}
+        scored = []
+        for section in sections:
+            score = sum(1 for word in words if word in section["lower"])
+            if any(word in section["title"].lower() for word in words):
+                score += 3
+            if score:
+                scored.append((score, section))
+        scored.sort(key=lambda item: -item[0])
+        if scored and scored[0][0] >= 4:
+            chosen.append(scored[0][1])
     if not chosen:
         return ""
-    section = next((s for s in sections if s["title"].startswith("24.")), None)
-    if section and section["title"] not in seen:
-        chosen.insert(0, section)
     chunks = [f"[{section['title']}]\n{section['body'][:1400]}" for section in chosen]
     return sanitize_sanin_links("\n\n".join(chunks)[:5000])
 
