@@ -749,7 +749,7 @@ def build_about_embed() -> discord.Embed:
         "settles character debates with data and reasoning, and never invents links or dates."
     )
     embed = discord.Embed(title="About San", description=description, color=discord.Color.blurple())
-    embed.add_field(name="Commands", value="/guide, /download, /tv, /movies, /faq, /ask, /release, /showdown, /search, /about, /memory", inline=False)
+    embed.add_field(name="Commands", value="/guide, /download, /tv, /movies, /faq, /ask, /release, /showdown, /search, /about, /memory, /tone, /write", inline=False)
     embed.add_field(name="How to talk to me", value="Mention me, reply to one of my messages, or DM me.", inline=False)
     return embed
 
@@ -1310,6 +1310,34 @@ async def memory_slash(interaction: discord.Interaction, user: discord.User | No
     await interaction.followup.send(chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
+
+@bot.tree.command(name="write", description="Post a message as San (owner only)")
+@app_commands.describe(message="Exact message to post", channel="Channel to post in (defaults to here)", role="Role to ping", release="Format as a release post with the download link")
+async def write_slash(interaction: discord.Interaction, message: str, channel: discord.TextChannel | None = None, role: discord.Role | None = None, release: bool = False):
+    if not is_owner(interaction.user):
+        await interaction.response.send_message("Owner only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    text = message.strip()
+    if not text:
+        await interaction.followup.send("Give me a message to post.", ephemeral=True)
+        return
+    if release:
+        text = f"**Sanin update**\n\n{text}\n\nDownload: {RELEASES_URL}"
+    mention = role.mention if role else ""
+    chunks = split_message(text, 1800 if mention else 1900)
+    target = channel or interaction.channel
+    try:
+        first = None
+        for index, chunk in enumerate(chunks):
+            content = f"{mention}\n{chunk}" if index == 0 and mention else chunk
+            sent = await target.send(content)
+            if first is None:
+                first = sent
+        await interaction.followup.send(f"Posted to {target.mention}: {first.jump_url}", ephemeral=True)
+    except Exception as e:
+        logging.warning(f"/write failed: {e}")
+        await interaction.followup.send("Couldn't post that. Check my permissions in the channel.", ephemeral=True)
 
 @bot.tree.command(name="tone", description="Set a user's remembered conversation style (owner only)")
 @app_commands.describe(description="How should San talk to this user?", user="User to set the style for")
