@@ -4,12 +4,13 @@ import re
 import json
 import base64
 import time
+import random
 import logging
 import asyncio
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
-from urllib.parse import quote, urlparse, parse_qs, unquote
+from urllib.parse import quote, urlparse, parse_qs, unquote, urljoin
 from html import unescape
 from aiohttp import web
 import aiohttp
@@ -36,6 +37,13 @@ WEB_HEADERS = {
     "Accept-Language": "en-US,en;q=0.8",
 }
 REPO_URL_RE = re.compile(r"https?://[^\s<>()]+", re.I)
+WAIT_LINES = (
+    "Hold on, checking a few repos.",
+    "Gimme a minute, testing these.",
+    "On it, checking which one actually works.",
+    "One sec, verifying a repo.",
+    "Hang on, testing a couple of options.",
+)
 
 GROQ_KEYS = [k.strip() for k in GROQ_KEYS_STR.split(",") if k.strip()]
 
@@ -475,6 +483,13 @@ async def fetch_json(url: str, params: dict | None = None, headers: dict | None 
                 raise Exception(f"HTTP {resp.status}")
             return await resp.json(content_type=None)
 
+async def fetch_text(url: str, headers: dict | None = None, timeout: int = 10) -> str:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status != 200:
+                raise Exception(f"HTTP {resp.status}")
+            return await resp.text()
+
 async def anilist_search(title: str, media_type: str = "ANIME") -> list:
     payload = {"query": ANILIST_QUERY, "variables": {"q": title, "type": media_type}}
     async with aiohttp.ClientSession() as session:
@@ -603,14 +618,17 @@ def is_public_repo_url(url: str) -> bool:
             pass
     return host not in ("::1",) and not host.startswith(("fc", "fd", "fe80"))
 
-async def test_repo(url: str) -> str:
+async def inspect_repo(url: str) -> dict:
     url = url.strip().rstrip(".,;")
+    result = {"url": url, "ok": False, "count": 0, "valid_urls": 0, "sample": "", "error": ""}
     if not is_public_repo_url(url):
-        return "That isn't a public http(s) repository URL."
+        result["error"] = "not a public http(s) URL"
+        return result
     try:
         data = await fetch_json(url, headers=WEB_HEADERS, timeout=20)
     except Exception as e:
-        return f"Repo check failed: {e}."
+        result["error"] = str(e)[:120]
+        return result
     items = data if isinstance(data, list) else None
     if isinstance(data, dict):
         for key in ("plugins", "extensions", "items", "data"):
@@ -621,22 +639,61 @@ async def test_repo(url: str) -> str:
             items = []
             for plugin_list in data["pluginLists"][:4]:
                 try:
-                    extra = await fetch_json(plugin_list, headers=WEB_HEADERS, timeout=20)
+                    target = urljoin(url, str(plugin_list))
+                    extra = await fetch_json(target, headers=WEB_HEADERS, timeout=20)
                     if isinstance(extra, list):
                         items.extend(extra)
                 except Exception:
                     continue
     if not isinstance(items, list):
-        return "Repo responded, but no plugin or extension list was found."
+        result["error"] = "no plugin list found"
+        return result
     if not items:
-        return "Repo responded and the manifest is valid, but it contains no plugins."
+        result["error"] = "manifest has no plugins"
+        return result
     names = [
         str(item.get("name") or item.get("internalName") or item.get("pkg") or item.get("id") or "unnamed")[:50]
         for item in items if isinstance(item, dict)
     ]
-    valid_urls = sum(1 for item in items if isinstance(item, dict) and str(item.get("url", "")).startswith("http"))
-    sample = ", ".join(names[:8]) if names else "no named entries"
-    return f"Repo OK: {len(items)} entries, {valid_urls} with valid plugin URLs. Sample: {sample}"
+    result.update(
+        ok=True,
+        count=len(items),
+        valid_urls=sum(1 for item in items if isinstance(item, dict) and str(item.get("url", "")).startswith("http")),
+        sample=", ".join(names[:8]) if names else "no named entries",
+    )
+    return result
+
+async def test_repo(url: str) -> str:
+    result = await inspect_repo(url)
+    if not result["ok"]:
+        return f"Repo check failed: {result['error']}."
+    return f"Repo OK: {result['count']} entries, {result['valid_urls']} with valid plugin URLs. Sample: {result['sample']}"
+
+def extract_repo_urls(text: str) -> list:
+    text = unescape(text or "")
+    found = re.findall(r"https?://[^\s\"'<>\)\]]+", text)
+    urls = []
+    for url in found:
+        url = url.rstrip(".,;:`")
+        if "github.com/" in url and "/blob/" in url:
+            url = url.replace("github.com/", "raw.githubusercontent.com/").replace("/blob/", "/")
+        if not url.endswith(".json") or url.lower().endswith(("package.json", "package-lock.json")):
+            continue
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+def asks_extension_repo(prompt: str) -> bool:
+    lower = prompt.lower()
+    if wants_sanin_links(prompt):
+        return False
+    if any(k in lower for k in ("how to add", "how do i add", "how can i add")):
+        return False
+    if any(k in lower for k in ("repo", "repository")):
+        return True
+    if REPO_URL_RE.search(prompt):
+        return any(k in lower for k in ("test", "check", "valid", "work", "broken"))
+    return "extension" in lower and any(k in lower for k in ("find", "recommend", "suggest", "which", "best", "good", "working"))
 
 def compact_anilist(items: list) -> list:
     out = []
@@ -712,13 +769,113 @@ async def wotaku_repos(prompt: str) -> str:
         return "Wotaku wiki had no matching extension repo list."
     return "Wotaku wiki extension repos: " + "; ".join(lines[:8])
 
+async def repo_page_text(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.hostname == "github.com":
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 2:
+            owner, repo = parts[0], parts[1]
+            for branch in ("HEAD", "main", "master"):
+                try:
+                    return await fetch_text(f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/README.md")
+                except Exception:
+                    continue
+    try:
+        return await fetch_text(url, timeout=8)
+    except Exception as e:
+        logging.warning(f"Repo page fetch failed for {url}: {e}")
+        return ""
+
+def repo_relevance_score(item: dict, prompt: str) -> int:
+    ignore = {"repo", "repository", "extension", "plugin", "cloudstream", "aniyomi", "stremio", "sanin", "best", "good", "working", "work", "please", "find", "give", "recommend", "which", "what", "where", "for", "with", "and"}
+    words = {word for word in re.findall(r"[a-z0-9]{3,}", prompt.lower()) if word not in ignore}
+    haystack = f"{item.get('title', '')} {item.get('snippet', '')}".lower()
+    return sum(1 for word in words if word in haystack)
+
+def format_repo_checks(checks: list) -> str | None:
+    verified = [check for check in checks if check.get("ok")]
+    unverified = [check for check in checks if not check.get("ok")]
+    if not verified and not unverified:
+        return None
+    lines = []
+    if verified:
+        first = verified[0]
+        lines.append(f"Here's one I verified: {first['url']} ({first['count']} plugins).")
+        if first.get("sample"):
+            lines.append(f"Includes: {first['sample']}.")
+        if len(verified) > 1:
+            lines.append("Also verified: " + ", ".join(check["url"] for check in verified[1:3]))
+    else:
+        lines.append("I couldn't verify a working repo from those results.")
+    if unverified:
+        lines.append("Unverified: " + ", ".join(check["url"] for check in unverified[:3]))
+    return "\n".join(lines)
+
+async def repo_recommendation(prompt: str) -> str | None:
+    if not asks_extension_repo(prompt):
+        return None
+    direct = REPO_URL_RE.search(prompt)
+    if direct:
+        return await test_repo(direct.group(0))
+
+    lower = prompt.lower()
+    queries = [prompt]
+    if not any(k in lower for k in ("cloudstream", "aniyomi", "stremio", "manga", "novel")):
+        queries.append(prompt + " cloudstream")
+    results = await asyncio.gather(
+        *(web_search(query) for query in queries[:2]),
+        wotaku_repos(lower),
+        return_exceptions=True,
+    )
+
+    candidates = []
+    pages = []
+    def add_urls(text: str):
+        for url in extract_repo_urls(text):
+            if url not in candidates:
+                candidates.append(url)
+
+    for result in results:
+        if isinstance(result, Exception):
+            logging.warning(f"Repo search failed: {result}")
+            continue
+        if isinstance(result, str):
+            add_urls(result)
+        elif isinstance(result, list):
+            for item in result:
+                if not isinstance(item, dict):
+                    continue
+                add_urls(item.get("snippet", ""))
+                add_urls(item.get("url", ""))
+                if item.get("url") and not item["url"].endswith(".json"):
+                    pages.append(item)
+
+    unique_pages = []
+    seen_pages = set()
+    for item in sorted(pages, key=lambda entry: -repo_relevance_score(entry, prompt)):
+        url = item.get("url", "")
+        if url and url not in seen_pages:
+            seen_pages.add(url)
+            unique_pages.append(url)
+    page_texts = await asyncio.gather(
+        *(repo_page_text(url) for url in unique_pages[:4]),
+        return_exceptions=True,
+    )
+    for text in page_texts:
+        if isinstance(text, str) and text:
+            add_urls(text)
+
+    candidates = candidates[:6]
+    if not candidates:
+        return None
+    checks = await asyncio.gather(*(inspect_repo(url) for url in candidates), return_exceptions=True)
+    clean_checks = [check for check in checks if isinstance(check, dict)]
+    return format_repo_checks(clean_checks)
+
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
     parts = []
     jobs = []
-    repo_url = REPO_URL_RE.search(prompt)
-    if repo_url and any(k in lower for k in ("test", "check", "repo", "repository", "valid", "work", "broken")):
-        jobs.append(("repo_test", test_repo(repo_url.group(0))))
     if len(prompt.split()) >= 2 and not re.fullmatch(r"(hi|hello|hey|yo|thanks|thank you|ok|okay)[!. ]*", lower):
         jobs.append(("web", web_search(prompt)))
     if any(k in lower for k in (" vs ", " versus ", "showdown", "who would win", "character", "debate")):
@@ -764,8 +921,6 @@ async def gather_context(prompt: str) -> str:
             parts.append(result)
         elif name == "web" and result:
             parts.append("Web search results (use these facts to answer; do not dump the list): " + json.dumps(result, ensure_ascii=False))
-        elif name == "repo_test" and result:
-            parts.append("Repo test: " + result)
     return "\n".join(parts) if parts else "No preloaded data for this topic; answer from your own knowledge."
 
 async def query_gemini(api_key: str, messages: list) -> str:
@@ -787,7 +942,7 @@ async def query_gemini(api_key: str, messages: list) -> str:
             logging.warning(f"Gemini {m} failed: {e}")
     raise Exception("All Gemini models failed")
 
-async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, context: str | None = None, user_id: int | None = None) -> str:
+async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, context: str | None = None, user_id: int | None = None, status=None) -> str:
     global groq_key_index
 
     session_key = f"{channel_id}:{user_id or user_name}"
@@ -797,6 +952,15 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         add_to_history(session_key, "user", user_prompt)
         add_to_history(session_key, "assistant", canned)
         return sanitize_sanin_links(canned)
+
+    if asks_extension_repo(user_prompt):
+        if status:
+            await status()
+        repo_answer = await repo_recommendation(user_prompt)
+        if repo_answer:
+            add_to_history(session_key, "user", user_prompt)
+            add_to_history(session_key, "assistant", repo_answer)
+            return repo_answer
 
     verified = context if context is not None else await gather_context(user_prompt)
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
@@ -866,7 +1030,7 @@ def build_about_embed() -> discord.Embed:
         "settles character debates with data and reasoning, and never invents links or dates."
     )
     embed = discord.Embed(title="About San", description=description, color=discord.Color.blurple())
-    embed.add_field(name="Commands", value="/guide, /download, /tv, /movies, /faq, /ask, /release, /showdown, /search, /testrepo, /about, /memory, /tone, /write", inline=False)
+    embed.add_field(name="Commands", value="/guide, /download, /tv, /movies, /faq, /ask, /release, /showdown, /search, /about, /memory, /tone, /write", inline=False)
     embed.add_field(name="How to talk to me", value="Mention me, reply to one of my messages, or DM me.", inline=False)
     return embed
 
@@ -1152,8 +1316,11 @@ async def on_message(message: discord.Message):
         if tone:
             await remember_tone(message.author, tone)
 
+        async def status():
+            await message.reply(random.choice(WAIT_LINES))
+
         async with message.channel.typing():
-            reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean, user_id=message.author.id)
+            reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean, user_id=message.author.id, status=status)
             chunks = split_message(reply_text)
             if chunks:
                 await message.reply(chunks[0])
@@ -1217,11 +1384,6 @@ async def search_prefix_cmd(ctx, *, query: str):
         return
     async with ctx.typing():
         await ctx.reply(embed=await build_search_embed(query))
-
-@bot.command(name="testrepo")
-async def testrepo_prefix_cmd(ctx, *, url: str):
-    async with ctx.typing():
-        await ctx.reply(await test_repo(url.strip()))
 
 @bot.command(name="about")
 async def about_prefix_cmd(ctx):
@@ -1317,7 +1479,11 @@ async def ask_slash(interaction: discord.Interaction, question: str):
     tone = detect_tone(question)
     if tone:
         await remember_tone(interaction.user, tone)
-    reply = await get_ai_response(interaction.channel_id, interaction.user.display_name, question, user_id=interaction.user.id)
+
+    async def status():
+        await interaction.followup.send(random.choice(WAIT_LINES))
+
+    reply = await get_ai_response(interaction.channel_id, interaction.user.display_name, question, user_id=interaction.user.id, status=status)
     chunks = split_message(reply)
     if chunks:
         await interaction.followup.send(chunks[0])
@@ -1370,12 +1536,6 @@ async def search_slash(interaction: discord.Interaction, query: str):
         await interaction.followup.send(canned)
         return
     await interaction.followup.send(embed=await build_search_embed(query))
-
-@bot.tree.command(name="testrepo", description="Test a CloudStream or Aniyomi repository URL")
-@app_commands.describe(url="Repository JSON URL")
-async def testrepo_slash(interaction: discord.Interaction, url: str):
-    await interaction.response.defer()
-    await interaction.followup.send(await test_repo(url.strip()))
 
 @bot.tree.command(name="about", description="What San is and what it can do")
 async def about_slash(interaction: discord.Interaction):
