@@ -2,7 +2,9 @@ import os
 import sys
 import logging
 import asyncio
+from collections import defaultdict
 from aiohttp import web
+import aiohttp
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -12,9 +14,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+GROQ_KEYS_STR = os.getenv("GROQ_API_KEYS", "")
+GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+
+GROQ_KEYS = [k.strip() for k in GROQ_KEYS_STR.split(",") if k.strip()]
 
 if not TOKEN or TOKEN == "your_bot_token_here":
-    print("❌ ERROR: DISCORD_TOKEN is missing or not set in .env")
+    print("❌ ERROR: DISCORD_TOKEN is missing or not set")
     sys.exit(1)
 
 intents = discord.Intents.default()
@@ -23,15 +29,153 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+# ==========================================
+# SANIN KNOWLEDGE & SYSTEM PROMPT
+# ==========================================
+SANIN_SYSTEM_PROMPT = """You are San, the official AI assistant for the Sanin (Orochimaru) app community on Discord.
+About Sanin:
+- Tagline: "Discover. Watch. Track. — built for TV, works on phones and tablets."
+- Platforms: Android Phones, Tablets, Android TV, and Amazon Fire TV (requires Android 5.0+ / API 21+).
+- GitHub Repo: https://github.com/Shippun58/Orochimaru
+- GitHub Releases: https://github.com/Shippun58/Orochimaru/releases
+- Discord: https://discord.gg/QCc5xbgbsA
+- Telegram: https://t.me/+91YmT3cUqv5iNDRk
+
+Key Features & FAQs:
+1. Extensions & Streaming:
+   - Sanin is an open-source media player interface; it does NOT host or stream copyrighted content.
+   - Streaming is enabled through third-party anime extensions.
+   - To install extensions: Open Sanin -> Settings -> Extensions -> Add Repository -> Enter extension repo URL -> Install extensions.
+   - If a video doesn't play or buffers: Try changing the stream server, updating the extension, or trying another source.
+2. Android TV & Fire TV:
+   - Dedicated remote-friendly TV interface with visible D-pad navigation focus states.
+   - Fire TV Install: Install the 'Downloader' app from the Amazon Appstore, enter the GitHub release APK link, and install.
+   - TV Remote controls: Left/Right to seek, OK/Center to play/pause, Down for subtitles/audio.
+   - Note on Samsung & LG: Samsung runs Tizen OS, LG runs webOS. They CANNOT install Android APKs directly. Users must plug in a Firestick, Chromecast with Google TV, or Android TV box.
+3. Tracking Accounts:
+   - Integrates with AniList, MyAnimeList (MAL), and Simkl for watch progress synchronization.
+   - Connect via Settings -> Accounts in the Sanin app.
+4. Player:
+   - Powered by Media3 ExoPlayer. Supports internal & online subtitles, speed adjustment, PiP (Picture-in-Picture), aspect ratio zoom/fit.
+
+Tone & Guidelines:
+- Friendly, helpful, concise, and enthusiastic.
+- Use Discord markdown (bold, bullet points, code blocks) for readability.
+- If unsure, provide the GitHub releases or recommend checking Settings in the app.
+"""
+
 APP_INFO = {
     "name": "Sanin (Orochimaru)",
     "tagline": "Discover. Watch. Track. — built for TV, works on phones and tablets.",
     "github_releases": "https://github.com/Shippun58/Orochimaru/releases",
     "github_repo": "https://github.com/Shippun58/Orochimaru",
-    "discord_invite": "https://discord.gg/QCc5xbgbsA",
-    "telegram_channel": "https://t.me/+91YmT3cUqv5iNDRk",
 }
 
+# ==========================================
+# CONVERSATION MEMORY (Per User/Channel)
+# ==========================================
+# Stores last 6 messages: {channel_id: [{"role": "user"|"assistant", "content": "..."}]}
+conversation_history = defaultdict(list)
+MAX_HISTORY = 6
+
+def add_to_history(channel_id: int, role: str, content: str):
+    history = conversation_history[channel_id]
+    history.append({"role": role, "content": content})
+    if len(history) > MAX_HISTORY:
+        conversation_history[channel_id] = history[-MAX_HISTORY:]
+
+# ==========================================
+# AI ENGINE: MULTI-PROVIDER KEY ROTATION
+# ==========================================
+groq_key_index = 0
+
+async def query_groq(api_key: str, model: str, messages: list) -> str:
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 450
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"].strip()
+            err_text = await resp.text()
+            raise Exception(f"Groq error {resp.status}: {err_text[:120]}")
+
+async def query_gemini(api_key: str, user_text: str) -> str:
+    models = ["gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-3.8-flash"]
+    for m in models:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+            payload = {
+                "contents": [
+                    {"parts": [{"text": f"{SANIN_SYSTEM_PROMPT}\n\nUser Question: {user_text}"}]}
+                ],
+                "generationConfig": {"maxOutputTokens": 450, "temperature": 0.7}
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception as e:
+            logging.warning(f"Gemini {m} failed: {e}")
+    raise Exception("All Gemini models failed")
+
+async def get_ai_response(channel_id: int, user_name: str, user_prompt: str) -> str:
+    global groq_key_index
+
+    # Build message thread for chat models
+    formatted_messages = [{"role": "system", "content": SANIN_SYSTEM_PROMPT}]
+    for msg in conversation_history[channel_id]:
+        formatted_messages.append(msg)
+    formatted_messages.append({"role": "user", "content": f"{user_name}: {user_prompt}"})
+
+    # 1. Try Groq Keys (Round-Robin with failover)
+    if GROQ_KEYS:
+        for _ in range(len(GROQ_KEYS)):
+            current_key = GROQ_KEYS[groq_key_index % len(GROQ_KEYS)]
+            groq_key_index += 1
+            for model in ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"]:
+                try:
+                    reply = await query_groq(current_key, model, formatted_messages)
+                    add_to_history(channel_id, "user", user_prompt)
+                    add_to_history(channel_id, "assistant", reply)
+                    return reply
+                except Exception as e:
+                    logging.warning(f"Groq key attempt failed with model {model}: {e}")
+
+    # 2. Failover to Gemini
+    if GEMINI_KEY:
+        try:
+            reply = await query_gemini(GEMINI_KEY, user_prompt)
+            add_to_history(channel_id, "user", user_prompt)
+            add_to_history(channel_id, "assistant", reply)
+            return reply
+        except Exception as e:
+            logging.warning(f"Gemini failover failed: {e}")
+
+    # 3. Built-in Offline Fallback
+    lower = user_prompt.lower()
+    if any(k in lower for k in ["download", "apk", "install"]):
+        return f"📥 You can download the latest Sanin APK directly from [GitHub Releases]({APP_INFO['github_releases']})!"
+    if any(k in lower for k in ["extension", "source", "repo", "stream"]):
+        return "🧩 **Extensions in Sanin:**\nOpen Sanin -> **Settings** -> **Extensions** -> **Add Repository**.\nInstall your favorite extension to resolve streams!"
+    if any(k in lower for k in ["samsung", "tizen", "lg"]):
+        return "📺 **Samsung & LG TVs:** They cannot install Android APKs directly. Plug in a Firestick or Chromecast with Google TV to run Sanin!"
+
+    return f"Hi {user_name}! I'm San, the assistant for **Sanin**. Type `/guide` to explore the app, or ask me anything!"
+
+# ==========================================
+# DISCORD UI COMPONENTS
+# ==========================================
 GUIDE_SECTIONS = {
     "download": {
         "title": "📥 Download & Installation Guide",
@@ -104,11 +248,7 @@ GUIDE_SECTIONS = {
 
 def create_guide_embed(section_key="download"):
     data = GUIDE_SECTIONS.get(section_key, GUIDE_SECTIONS["download"])
-    embed = discord.Embed(
-        title=data["title"],
-        description=data["description"],
-        color=data["color"]
-    )
+    embed = discord.Embed(title=data["title"], description=data["description"], color=data["color"])
     for name, value, inline in data.get("fields", []):
         embed.add_field(name=name, value=value, inline=inline)
     embed.set_footer(text=f"{APP_INFO['name']} • Official Guide")
@@ -136,6 +276,9 @@ class GuideView(discord.ui.View):
         self.add_item(discord.ui.Button(label="GitHub Releases", url=APP_INFO["github_releases"], emoji="📦", row=1))
         self.add_item(discord.ui.Button(label="Source Code", url=APP_INFO["github_repo"], emoji="💻", row=1))
 
+# ==========================================
+# DISCORD EVENTS
+# ==========================================
 @bot.event
 async def on_ready():
     logging.info(f"✅ Bot is ONLINE as {bot.user.name} (ID: {bot.user.id})")
@@ -152,9 +295,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    logging.info(f"📥 [MESSAGE] From {message.author} in #{message.channel}: {repr(message.content)}")
-
-    # Check mention, reply, or DM
     is_mentioned = bot.user in message.mentions
     is_reply_to_bot = (message.reference and message.reference.resolved and 
                        isinstance(message.reference.resolved, discord.Message) and 
@@ -162,22 +302,20 @@ async def on_message(message: discord.Message):
     is_dm = isinstance(message.channel, discord.DMChannel)
 
     if is_mentioned or is_reply_to_bot or is_dm:
-        clean = message.clean_content.replace(f"@{bot.user.name}", "").strip().lower()
-        if any(w in clean for w in ["hi", "hello", "hey"]):
-            reply = f"Hello {message.author.display_name}! 👋 I'm **San**, the official assistant for **Sanin**.\nType `/guide` or `!guide` to explore the app!"
-        elif any(w in clean for w in ["download", "apk", "install"]):
-            reply = f"📥 You can download the latest Sanin APK from [GitHub Releases]({APP_INFO['github_releases']})!"
-        elif any(w in clean for w in ["tv", "firestick", "samsung"]):
-            reply = "📺 Sanin works on Android TV & Fire TV! (Samsung Tizen and LG webOS are not supported as they don't run Android APKs)."
-        else:
-            reply = f"Hi {message.author.display_name}! I'm Sanin's guide bot. Try using `/guide` or `!guide` to explore features and FAQs."
-        
-        await message.reply(reply)
+        clean = message.clean_content.replace(f"@{bot.user.name}", "").strip()
+        if not clean:
+            clean = "Hello!"
+
+        async with message.channel.typing():
+            reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean)
+            await message.reply(reply_text)
         return
 
     await bot.process_commands(message)
 
-# Prefix commands
+# ==========================================
+# COMMANDS
+# ==========================================
 @bot.command(name="ping")
 async def ping_cmd(ctx):
     await ctx.reply(f"🏓 Pong! Latency: `{round(bot.latency * 1000)}ms`")
@@ -202,7 +340,13 @@ async def faq_prefix_cmd(ctx):
     embed = create_guide_embed("faq")
     await ctx.send(embed=embed)
 
-# Slash commands
+@bot.tree.command(name="ask", description="Ask San anything about Sanin or chat")
+@app_commands.describe(question="Your question for San")
+async def ask_slash(interaction: discord.Interaction, question: str):
+    await interaction.response.defer()
+    reply = await get_ai_response(interaction.channel_id, interaction.user.display_name, question)
+    await interaction.followup.send(reply)
+
 @bot.tree.command(name="guide", description="Interactive guide for Sanin (Orochimaru)")
 async def guide_slash(interaction: discord.Interaction):
     embed = create_guide_embed("download")
@@ -224,15 +368,14 @@ async def faq_slash(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 # ==========================================
-# HEALTH-CHECK WEB SERVER (Keeps Cloud Host Happy)
+# HEALTH-CHECK WEB SERVER
 # ==========================================
 async def start_health_server():
     app = web.Application()
     async def index(request):
-        return web.Response(text="San Discord Bot is running live!")
+        return web.Response(text="San Discord Bot (AI Powered) is running live!")
     app.router.add_get("/", index)
     app.router.add_get("/healthz", index)
-    
     port = int(os.getenv("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()
