@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, parse_qs, unquote
 from html import unescape
 from aiohttp import web
 import aiohttp
@@ -31,6 +31,11 @@ MEMORY_BRANCH = os.getenv("MEMORY_BRANCH", "memory")
 LOCAL_MEMORY_FILE = Path(__file__).with_name("memory.json")
 DEV_ID = os.getenv("DEV_ID", os.getenv("OWNER_ID", "1464266754980315324"))
 MANUAL_PATH = Path(__file__).with_name("sanin_manual.md")
+WEB_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; SaninBot/1.0; +https://sanin-discord-bot.onrender.com/healthz)",
+    "Accept-Language": "en-US,en;q=0.8",
+}
+REPO_URL_RE = re.compile(r"https?://[^\s<>()]+", re.I)
 
 GROQ_KEYS = [k.strip() for k in GROQ_KEYS_STR.split(",") if k.strip()]
 
@@ -47,13 +52,18 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 # ==========================================
 # SANIN KNOWLEDGE & SYSTEM PROMPT
 # ==========================================
+OFFICIAL_REPO = "https://github.com/Nashon-ops/Sanin"
+RELEASES_URL = f"{OFFICIAL_REPO}/releases"
+
 SANIN_SYSTEM_PROMPT = """You are San, a helper in the Sanin Discord.
 
 Identity
 - Sanin is an open-source media player and tracker for Android phones, tablets, Android TV, and Fire TV.
 - If someone asks who made you, answer in one plain sentence: built around Sanin by its developers and open-source contributors. No speech, no mascot intro.
-- Never provide, name, or link the Sanin GitHub repository or release pages. If someone asks for them, say you can't share repo or release links.
-- For install and update questions, give the app steps only and do not attach a link. Extension repositories are different: use owner notes and verified data.
+- Official repo: https://github.com/Nashon-ops/Sanin
+- Official releases: https://github.com/Nashon-ops/Sanin/releases
+- Only include those two links when the user explicitly asks for the repo, source code, GitHub, release page, download link, or latest version. Never attach them to normal answers and never repeat a refusal policy.
+- Extension repositories are different: use Wotaku, live search results, and owner notes. Do not confuse them with the Sanin app repo.
 - For every other topic, do not bring up Sanin or its links at all.
 
 Voice
@@ -63,8 +73,9 @@ Voice
 - No emojis unless the user uses them first. Short replies beat polished ones.
 
 Sanin support
-- When someone describes a Sanin bug or asks how to do something, diagnose or answer right away. Do not ask if they want help and do not tell them to ask for help.
-- Use the support manual when it is provided. Give the smallest useful sequence of steps with exact paths.
+- If someone gives a specific bug, answer with the smallest useful steps. Do not ask if they want help.
+- If someone only says they are stuck, lost, or something is not working, ask one short question about the exact screen, error, or mode. Do not dump the manual or list every possible fix.
+- Use the support manual only when it directly matches the reported issue. Never paste or summarize whole manual sections.
 - Identify mode (Anime or Movie & TV), device, and whether audio and controls work only when it changes the fix. Do not interrogate them.
 - Black video in Anime: switch server/source first, then Settings > Playback & App Behaviour > Player & Sync > Player Settings > Video, Video output to TextureView, then Decoder to Hardware+, then Software. Clear cache if relevant, never clear app data.
 - Black video in Movie & TV: switch server/source/quality first. Anime Decoder and Video output do not apply to that player.
@@ -88,6 +99,8 @@ Formatting
 - Do not use emojis as bullets, markers, or decoration.
 
 Accuracy
+- Live web search results may be provided. Check them and answer from them. Never dump the result list, raw snippets, or a wall of URLs.
+- Never say you cannot search the web. If results are missing, answer from your own knowledge and say it may be outdated.
 - "Verified data" and the manual are helpful context, not a cage. Use your own knowledge freely for anime, characters, rumors, and theories.
 - Talk about rumors as rumors: what is known, what is reported, and what is still speculation. Never brush off a question just because it is not about Sanin.
 - Answer directly. If a current number is not in the data, give your best knowledge-based answer and flag it as possibly outdated instead of telling the user where to look.
@@ -102,6 +115,17 @@ APP_INFO = {
 
 SANIN_LINK_RE = re.compile(r"(?:https?://)?(?:www\.)?github\.com/Nashon-ops/Sanin(?:/releases)?/?", re.I)
 SANIN_MD_LINK_RE = re.compile(r"\[[^\]]*\]\(\s*(?:https?://)?(?:www\.)?github\.com/Nashon-ops/Sanin[^)]*\)", re.I)
+
+def wants_sanin_links(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    short = lower.strip(" ?!.")
+    if short in {"repo", "repository", "source", "source code", "github", "releases", "release page", "download", "apk", "latest version"}:
+        return True
+    if not any(k in lower for k in ("repo", "repository", "source code", "github", "release page", "releases page", "download link", "apk link", "latest version")):
+        return False
+    if "download" in lower and "where" in lower:
+        return True
+    return any(k in lower for k in ("sanin", "official", "your", "you", "app", "bot"))
 
 def sanitize_sanin_links(text: str) -> str:
     if not text:
@@ -136,7 +160,7 @@ def manual_context(prompt: str) -> str:
     if not sections:
         return ""
     lower = prompt.lower()
-    support_words = ("sanin", "app", "player", "extension", "source", "add-on", "addon", "black", "video", "audio", "subtitle", "download", "crash", "error", "buffer", "install", "update", "apk", "fire tv", "android tv", "settings", "tracker", "log", "stremio", "cloudstream", "movie & tv")
+    support_words = ("sanin", "player", "extension", "source", "add-on", "addon", "black", "video", "audio", "subtitle", "crash", "error", "buffer", "install", "update", "apk", "fire tv", "android tv", "settings", "tracker", "log", "stremio", "cloudstream", "movie & tv")
     if not any(word in lower for word in support_words):
         return ""
     words = {word.strip() for word in re.findall(r"[a-z0-9 &]+", lower) if len(word.strip()) >= 4 and word.strip() not in MANUAL_STOPWORDS}
@@ -150,17 +174,15 @@ def manual_context(prompt: str) -> str:
     scored.sort(key=lambda item: -item[0])
     chosen = []
     seen = set()
-    for _, section in scored[:3]:
+    for _, section in scored[:2]:
         if section["title"] not in seen:
             chosen.append(section)
             seen.add(section["title"])
-    for prefix in ("24.", "0."):
-        section = next((s for s in sections if s["title"].startswith(prefix)), None)
-        if section and section["title"] not in seen:
-            chosen.insert(0, section)
-            seen.add(section["title"])
     if not chosen:
         return ""
+    section = next((s for s in sections if s["title"].startswith("24.")), None)
+    if section and section["title"] not in seen:
+        chosen.insert(0, section)
     chunks = [f"[{section['title']}]\n{section['body'][:1400]}" for section in chosen]
     return sanitize_sanin_links("\n\n".join(chunks)[:5000])
 
@@ -419,13 +441,11 @@ def fit_text(text: str, limit: int) -> str:
 
 def canonical_reply(prompt: str, learned_facts: list | None = None) -> str | None:
     lower = prompt.lower()
-    asks_link = any(k in lower for k in ("repo", "repository", "source code", "github", "download", "apk", "latest version", "install"))
-    about_bot = any(k in lower for k in ("sanin", "app", "bot"))
+    if wants_sanin_links(prompt):
+        return f"Repo: {OFFICIAL_REPO}\nReleases: {RELEASES_URL}"
     if learned_facts and any(any(k in fact.lower() for k in ("repo", "wotaku", "extension", "source")) for fact in learned_facts):
         if any(k in lower for k in ("repo", "extension", "source")):
             return None
-    if asks_link and about_bot:
-        return "I can't share repo or release links."
     return None
 
 def format_date(value) -> str:
@@ -524,7 +544,7 @@ async def wiki_search(query: str) -> list:
     data = await fetch_json(
         "https://en.wikipedia.org/w/api.php",
         params={"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": 3},
-        headers={"User-Agent": "SanBot/1.0"},
+        headers=WEB_HEADERS,
     )
     results = []
     for item in (data.get("query") or {}).get("search", []):
@@ -532,6 +552,91 @@ async def wiki_search(query: str) -> list:
         snippet = unescape(re.sub(r"<[^>]+>", "", item.get("snippet", "")))
         results.append({"title": title, "snippet": snippet[:220], "url": "https://en.wikipedia.org/wiki/" + quote(title.replace(" ", "_"))})
     return results
+
+def decode_search_url(href: str) -> str:
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urlparse(href)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        target = parse_qs(parsed.query).get("uddg")
+        if target:
+            return unquote(target[0])
+    return href
+
+async def web_search(query: str) -> list:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            "https://lite.duckduckgo.com/lite/",
+            params={"q": query},
+            headers=WEB_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=12),
+        ) as resp:
+            if resp.status != 200:
+                raise Exception(f"search HTTP {resp.status}")
+            html = await resp.text()
+    links = re.findall(r"<a[^>]+href=\"([^\"]+)\"[^>]*class=['\"]result-link['\"][^>]*>(.*?)</a>", html, re.S)
+    snippets = re.findall(r"<td class=['\"]result-snippet['\"]>(.*?)</td>", html, re.S)
+    results = []
+    for index, (href, title) in enumerate(links[:5]):
+        title = " ".join(unescape(re.sub(r"<[^>]+>", "", title)).split())
+        snippet = snippets[index] if index < len(snippets) else ""
+        snippet = " ".join(unescape(re.sub(r"<[^>]+>", "", snippet)).split())[:300]
+        url = decode_search_url(href)
+        if title and url.startswith("http"):
+            results.append({"title": title, "snippet": snippet, "url": url})
+    return results
+
+def is_public_repo_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    if host == "localhost" or host.endswith((".local", ".internal")):
+        return False
+    if host.startswith(("127.", "10.", "192.168.", "169.254.", "0.")):
+        return False
+    if host.startswith("172."):
+        try:
+            if 16 <= int(host.split(".")[1]) <= 31:
+                return False
+        except (IndexError, ValueError):
+            pass
+    return host not in ("::1",) and not host.startswith(("fc", "fd", "fe80"))
+
+async def test_repo(url: str) -> str:
+    url = url.strip().rstrip(".,;")
+    if not is_public_repo_url(url):
+        return "That isn't a public http(s) repository URL."
+    try:
+        data = await fetch_json(url, headers=WEB_HEADERS, timeout=20)
+    except Exception as e:
+        return f"Repo check failed: {e}."
+    items = data if isinstance(data, list) else None
+    if isinstance(data, dict):
+        for key in ("plugins", "extensions", "items", "data"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+        if items is None and isinstance(data.get("pluginLists"), list):
+            items = []
+            for plugin_list in data["pluginLists"][:4]:
+                try:
+                    extra = await fetch_json(plugin_list, headers=WEB_HEADERS, timeout=20)
+                    if isinstance(extra, list):
+                        items.extend(extra)
+                except Exception:
+                    continue
+    if not isinstance(items, list):
+        return "Repo responded, but no plugin or extension list was found."
+    if not items:
+        return "Repo responded and the manifest is valid, but it contains no plugins."
+    names = [
+        str(item.get("name") or item.get("internalName") or item.get("pkg") or item.get("id") or "unnamed")[:50]
+        for item in items if isinstance(item, dict)
+    ]
+    valid_urls = sum(1 for item in items if isinstance(item, dict) and str(item.get("url", "")).startswith("http"))
+    sample = ", ".join(names[:8]) if names else "no named entries"
+    return f"Repo OK: {len(items)} entries, {valid_urls} with valid plugin URLs. Sample: {sample}"
 
 def compact_anilist(items: list) -> list:
     out = []
@@ -611,6 +716,11 @@ async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
     parts = []
     jobs = []
+    repo_url = REPO_URL_RE.search(prompt)
+    if repo_url and any(k in lower for k in ("test", "check", "repo", "repository", "valid", "work", "broken")):
+        jobs.append(("repo_test", test_repo(repo_url.group(0))))
+    if len(prompt.split()) >= 2 and not re.fullmatch(r"(hi|hello|hey|yo|thanks|thank you|ok|okay)[!. ]*", lower):
+        jobs.append(("web", web_search(prompt)))
     if any(k in lower for k in (" vs ", " versus ", "showdown", "who would win", "character", "debate")):
         sides = re.split(r"\s+(?:vs\.?|versus)\s+", prompt, maxsplit=1, flags=re.I)
         for side in sides[:2]:
@@ -652,6 +762,10 @@ async def gather_context(prompt: str) -> str:
             parts.append("Wikipedia: " + json.dumps(result, ensure_ascii=False))
         elif name == "wotaku" and result:
             parts.append(result)
+        elif name == "web" and result:
+            parts.append("Web search results (use these facts to answer; do not dump the list): " + json.dumps(result, ensure_ascii=False))
+        elif name == "repo_test" and result:
+            parts.append("Repo test: " + result)
     return "\n".join(parts) if parts else "No preloaded data for this topic; answer from your own knowledge."
 
 async def query_gemini(api_key: str, messages: list) -> str:
@@ -710,7 +824,9 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         if re.search(r"\bCANNOT_HELP\b", reply, re.I):
             reply = f"Unfortunately I can't help with that. Ask <@{DEV_ID}> if you need a hand."
         else:
-            reply = sanitize_sanin_links(clean_reply(reply))
+            reply = clean_reply(reply)
+            if not wants_sanin_links(user_prompt):
+                reply = sanitize_sanin_links(reply)
         add_to_history(session_key, "user", user_prompt)
         add_to_history(session_key, "assistant", reply)
         return reply
@@ -733,7 +849,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     lower = user_prompt.lower()
     if any(k in lower for k in ["download", "apk", "install"]):
-        reply = "I can't share repo or release links."
+        reply = f"Repo: {OFFICIAL_REPO}\nReleases: {RELEASES_URL}"
     elif any(k in lower for k in ["extension", "source", "repo", "stream"]):
         reply = "Extensions: Sanin -> Settings -> Extensions -> Add Repository -> paste a repo URL, then install what you need."
     elif any(k in lower for k in ["samsung", "tizen", "lg"]):
@@ -750,7 +866,7 @@ def build_about_embed() -> discord.Embed:
         "settles character debates with data and reasoning, and never invents links or dates."
     )
     embed = discord.Embed(title="About San", description=description, color=discord.Color.blurple())
-    embed.add_field(name="Commands", value="/guide, /download, /tv, /movies, /faq, /ask, /release, /showdown, /search, /about, /memory, /tone, /write", inline=False)
+    embed.add_field(name="Commands", value="/guide, /download, /tv, /movies, /faq, /ask, /release, /showdown, /search, /testrepo, /about, /memory, /tone, /write", inline=False)
     embed.add_field(name="How to talk to me", value="Mention me, reply to one of my messages, or DM me.", inline=False)
     return embed
 
@@ -843,11 +959,17 @@ async def build_showdown_embed(first: str, second: str, channel_id: int) -> disc
 async def build_search_embed(query: str) -> discord.Embed:
     lines = []
     try:
-        results = await wiki_search(query)
+        results = await web_search(query)
     except Exception as e:
-        logging.warning(f"Wikipedia search failed: {e}")
+        logging.warning(f"Web search failed: {e}")
         results = []
-    for item in results[:3]:
+    if not results:
+        try:
+            results = await wiki_search(query)
+        except Exception as e:
+            logging.warning(f"Wikipedia search failed: {e}")
+            results = []
+    for item in results[:5]:
         lines.append(f"**{item['title']}**\n{item['snippet']}\n{item['url']}")
     description = "\n\n".join(lines) if lines else "No results found. Try different wording."
     return discord.Embed(title=f"Search: {query}", description=description, color=discord.Color.blurple())
@@ -960,6 +1082,10 @@ def create_guide_embed(section_key="download"):
     embed.set_footer(text=f"{APP_INFO['name']} • Official Guide")
     return embed
 
+def add_official_links(embed: discord.Embed) -> discord.Embed:
+    embed.add_field(name="Official links", value=f"[Releases]({RELEASES_URL})\n[Source]({OFFICIAL_REPO})", inline=False)
+    return embed
+
 class GuideSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -1051,7 +1177,7 @@ async def guide_prefix_cmd(ctx):
 
 @bot.command(name="download")
 async def download_prefix_cmd(ctx):
-    embed = create_guide_embed("download")
+    embed = add_official_links(create_guide_embed("download"))
     await ctx.send(embed=embed)
 
 @bot.command(name="tv")
@@ -1091,6 +1217,11 @@ async def search_prefix_cmd(ctx, *, query: str):
         return
     async with ctx.typing():
         await ctx.reply(embed=await build_search_embed(query))
+
+@bot.command(name="testrepo")
+async def testrepo_prefix_cmd(ctx, *, url: str):
+    async with ctx.typing():
+        await ctx.reply(await test_repo(url.strip()))
 
 @bot.command(name="about")
 async def about_prefix_cmd(ctx):
@@ -1200,7 +1331,7 @@ async def guide_slash(interaction: discord.Interaction):
 
 @bot.tree.command(name="download", description="Get install instructions")
 async def download_slash(interaction: discord.Interaction):
-    embed = create_guide_embed("download")
+    embed = add_official_links(create_guide_embed("download"))
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="tv", description="Guide for Android TV and Firestick")
@@ -1239,6 +1370,12 @@ async def search_slash(interaction: discord.Interaction, query: str):
         await interaction.followup.send(canned)
         return
     await interaction.followup.send(embed=await build_search_embed(query))
+
+@bot.tree.command(name="testrepo", description="Test a CloudStream or Aniyomi repository URL")
+@app_commands.describe(url="Repository JSON URL")
+async def testrepo_slash(interaction: discord.Interaction, url: str):
+    await interaction.response.defer()
+    await interaction.followup.send(await test_repo(url.strip()))
 
 @bot.tree.command(name="about", description="What San is and what it can do")
 async def about_slash(interaction: discord.Interaction):
