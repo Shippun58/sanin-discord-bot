@@ -222,6 +222,32 @@ async def remember_user(user, fact: str) -> bool:
     entry["facts"] = (entry["facts"] + [fact])[-20:]
     return await save_memory(data)
 
+def detect_tone(content: str) -> str:
+    low = content.lower()
+    profanity = ("fuck", "shit", "damn", "bitch", "wtf", "bullshit", "crap", "asshole")
+    harsh = ("idiot", "stupid", "trash", "garbage", "shut up", "dumb", "loser")
+    curse_hits = sum(1 for word in profanity if word in low)
+    harsh_hits = sum(1 for word in harsh if word in low)
+    if curse_hits >= 1 and harsh_hits >= 1:
+        return "throws curse words and is blunt; match their energy, stay sharp and informal"
+    if curse_hits:
+        return "throws curse words sometimes; keep it casual and don't be stiff or preachy"
+    if harsh_hits:
+        return "harsh and blunt; skip pleasantries and give it to them straight"
+    return ""
+
+async def remember_tone(user, tone: str) -> bool:
+    tone = tone.strip()
+    if not tone:
+        return False
+    data = await load_memory()
+    entry = data["users"].setdefault(str(user.id), {"name": getattr(user, "display_name", str(user)), "facts": [], "tone": ""})
+    entry["name"] = getattr(user, "display_name", entry.get("name", str(user)))
+    if entry.get("tone") == tone:
+        return False
+    entry["tone"] = tone
+    return await save_memory(data)
+
 # ==========================================
 # AI ENGINE: MULTI-PROVIDER KEY ROTATION
 # ==========================================
@@ -545,8 +571,14 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         system_prompt += "\n\nOwner notes (trusted, apply them whenever relevant):\n" + "\n".join(f"- {fact}" for fact in memory["facts"][-25:])
     if user_id:
         user_entry = memory["users"].get(str(user_id))
-        if user_entry and user_entry.get("facts"):
-            system_prompt += f"\n\nAbout {user_name} (remembered):\n" + "\n".join(f"- {fact}" for fact in user_entry["facts"][-20:])
+        if user_entry:
+            details = []
+            if user_entry.get("facts"):
+                details.extend(f"- {fact}" for fact in user_entry["facts"][-20:])
+            if user_entry.get("tone"):
+                details.append(f"- Style: {user_entry['tone']}. Adapt your tone to match, without being preachy.")
+            if details:
+                system_prompt += f"\n\nAbout {user_name} (remembered):\n" + "\n".join(details)
     formatted_messages = [{"role": "system", "content": system_prompt}]
     for msg in conversation_history[session_key]:
         formatted_messages.append(msg)
@@ -856,6 +888,9 @@ async def on_message(message: discord.Message):
         fact = extract_user_fact(message.clean_content)
         if fact:
             await remember_user(message.author, fact)
+        tone = detect_tone(message.clean_content)
+        if tone:
+            await remember_tone(message.author, tone)
 
         async with message.channel.typing():
             reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean, user_id=message.author.id)
@@ -976,14 +1011,36 @@ async def memory_prefix_cmd(ctx):
         lines.append("General")
         lines.extend(f"{i}. {fact}" for i, fact in enumerate(data["facts"], 1))
     entry = data["users"].get(str(target.id))
-    if entry and entry.get("facts"):
+    if entry and (entry.get("facts") or entry.get("tone")):
         lines.append(entry.get("name", "User"))
-        lines.extend(f"{i}. {fact}" for i, fact in enumerate(entry["facts"], 1))
+        lines.extend(f"{i}. {fact}" for i, fact in enumerate(entry.get("facts", []), 1))
+        if entry.get("tone"):
+            lines.append(f"Style: {entry['tone']}")
     if not lines:
         await ctx.reply("Nothing learned yet.")
         return
     for chunk in split_message("\n".join(lines)):
         await ctx.reply(chunk)
+
+@bot.command(name="tone")
+async def tone_prefix_cmd(ctx, *, description: str):
+    if not is_owner(ctx.author):
+        await ctx.reply("Owner only.")
+        return
+    target = ctx.message.mentions[0] if ctx.message.mentions else None
+    if target:
+        description = re.sub(r"^<@!?\d+>\s*", "", description).strip()
+    description = description.strip()
+    if not description:
+        await ctx.reply("Give me a style to remember.")
+        return
+    data = await load_memory()
+    entry = data["users"].setdefault(str(target.id if target else ctx.author.id), {"name": (target or ctx.author).display_name, "facts": [], "tone": ""})
+    entry["tone"] = description
+    if await save_memory(data):
+        await ctx.reply(f"Saved style for {entry['name']}.")
+    else:
+        await ctx.reply("Couldn't save that right now.")
 
 @bot.tree.command(name="ask", description="Ask San anything about Sanin or chat")
 @app_commands.describe(question="Your question for San")
@@ -992,6 +1049,9 @@ async def ask_slash(interaction: discord.Interaction, question: str):
     fact = extract_user_fact(question)
     if fact:
         await remember_user(interaction.user, fact)
+    tone = detect_tone(question)
+    if tone:
+        await remember_tone(interaction.user, tone)
     reply = await get_ai_response(interaction.channel_id, interaction.user.display_name, question, user_id=interaction.user.id)
     chunks = split_message(reply)
     if chunks:
@@ -1101,9 +1161,11 @@ async def memory_slash(interaction: discord.Interaction, user: discord.User | No
         lines.append("General")
         lines.extend(f"{i}. {fact}" for i, fact in enumerate(data["facts"], 1))
     entry = data["users"].get(str(target.id))
-    if entry and entry.get("facts"):
+    if entry and (entry.get("facts") or entry.get("tone")):
         lines.append(entry.get("name", "User"))
-        lines.extend(f"{i}. {fact}" for i, fact in enumerate(entry["facts"], 1))
+        lines.extend(f"{i}. {fact}" for i, fact in enumerate(entry.get("facts", []), 1))
+        if entry.get("tone"):
+            lines.append(f"Style: {entry['tone']}")
     if not lines:
         await interaction.followup.send("Nothing learned yet.")
         return
@@ -1111,6 +1173,26 @@ async def memory_slash(interaction: discord.Interaction, user: discord.User | No
     await interaction.followup.send(chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
+
+@bot.tree.command(name="tone", description="Set a user's remembered conversation style (owner only)")
+@app_commands.describe(description="How should San talk to this user?", user="User to set the style for")
+async def tone_slash(interaction: discord.Interaction, description: str, user: discord.User | None = None):
+    if not is_owner(interaction.user):
+        await interaction.response.send_message("Owner only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    description = description.strip()
+    if not description:
+        await interaction.followup.send("Give me a style to remember.", ephemeral=True)
+        return
+    target = user or interaction.user
+    data = await load_memory()
+    entry = data["users"].setdefault(str(target.id), {"name": target.display_name, "facts": [], "tone": ""})
+    entry["tone"] = description
+    if await save_memory(data):
+        await interaction.followup.send(f"Saved style for {target.display_name}.", ephemeral=True)
+    else:
+        await interaction.followup.send("Couldn't save that right now.", ephemeral=True)
 
 # ==========================================
 # HEALTH-CHECK WEB SERVER
