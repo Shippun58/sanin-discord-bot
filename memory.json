@@ -4,7 +4,8 @@
     "also tell user to disable all motions for smooth feel",
     "when user asks about a show pls search it first ie search on tmdb and anilist and give from one not both",
     "sync is on player not setting",
-    "stop sending github repo url /release unless asked pls don't"
+    "stop sending github repo url /release unless asked pls don't",
+    "<@1527953814139834368> Is an owner too"
   ],
   "users": {
     "999": {
