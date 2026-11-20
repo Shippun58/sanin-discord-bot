@@ -1,5 +1,7 @@
 {
-  "facts": [],
+  "facts": [
+    "when user asks for repo give them a real repo url, if it's anime repo get from wotaku wiki and give. If movie give cs3 repo and short code and tell users where to get stremio addon"
+  ],
   "users": {
     "999": {
       "name": "tester",
