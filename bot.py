@@ -2,8 +2,11 @@ import os
 import sys
 import re
 import json
+import base64
+import time
 import logging
 import asyncio
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
 from urllib.parse import quote
@@ -22,6 +25,10 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_KEYS_STR = os.getenv("GROQ_API_KEYS", "")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
+GH_TOKEN = os.getenv("GH_TOKEN", "")
+MEMORY_REPO = os.getenv("MEMORY_REPO", "Shippun58/sanin-discord-bot")
+MEMORY_BRANCH = os.getenv("MEMORY_BRANCH", "memory")
+LOCAL_MEMORY_FILE = Path(__file__).with_name("memory.json")
 
 GROQ_KEYS = [k.strip() for k in GROQ_KEYS_STR.split(",") if k.strip()]
 
@@ -48,6 +55,16 @@ Identity and links
 - The only official source code link is https://github.com/Nashon-ops/Sanin
 - The only official download link is https://github.com/Nashon-ops/Sanin/releases
 - For Sanin questions, use only those official links. For every other topic, do not bring up Sanin or its links at all.
+
+Sanin app facts
+- It is a free, open-source media player and tracker. It does not host anything; streams come from extensions and add-ons you install.
+- Extensions: Settings > Extensions > Add Repository. Paste a trusted repo shortcode like username/repo/branch, or a raw index.min.json URL. Anime, manga, and novel repositories are separate. Then install the extension you want. Only use repositories you trust, and try a VPN if a repo won't load.
+- Movies and TV: open Movies or TV from home, pick a title, then Play Movie. If it says no sources installed, go back to Settings > Extensions > Add Repository and install a CloudStream source repo first.
+- Add-ons: Settings > Add-ons > Install Add-on for extra features like downloaders. Add-ons are not the same as streaming sources.
+- Tracking: link AniList, MyAnimeList, or Simkl under Settings > Accounts.
+- Player: Media3 ExoPlayer with subtitles, speed control, PiP, and aspect-ratio options. On TV, left/right seeks, center plays or pauses, and down opens subtitle/audio options.
+- Samsung and LG TVs cannot install APKs directly. Use a Fire TV Stick, Chromecast with Google TV, or Android box instead.
+- Android 5+ is supported. Ask for the official releases link whenever someone wants to download.
 
 Personality
 - You are a chill, sharp anime and TV nerd who talks like a knowledgeable friend.
@@ -84,6 +101,89 @@ def add_to_history(channel_id: int, role: str, content: str):
     history.append({"role": role, "content": content})
     if len(history) > MAX_HISTORY:
         conversation_history[channel_id] = history[-MAX_HISTORY:]
+
+# ==========================================
+# OWNER LEARNED MEMORY
+# ==========================================
+memory_cache = {"facts": None, "checked_at": 0.0}
+
+def is_owner(user) -> bool:
+    owner_id = os.getenv("OWNER_ID", "").strip()
+    if owner_id:
+        return str(user.id) == owner_id
+    owner = getattr(bot.application, "owner", None)
+    if owner is None:
+        return False
+    if hasattr(owner, "id"):
+        return user.id == owner.id
+    members = getattr(owner, "members", None)
+    return bool(members and any(user.id == member.id for member in members))
+
+def github_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "Sanin-Discord-Bot/1.0",
+    }
+
+async def load_memory() -> list:
+    now = time.time()
+    if memory_cache["facts"] is not None and now - memory_cache["checked_at"] < 60:
+        return list(memory_cache["facts"])
+    facts = []
+    if GH_TOKEN:
+        url = f"https://api.github.com/repos/{MEMORY_REPO}/contents/memory.json"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"ref": MEMORY_BRANCH}, headers=github_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        decoded = base64.b64decode(data.get("content", "")).decode("utf-8", errors="replace")
+                        facts = json.loads(decoded).get("facts", [])
+                    else:
+                        logging.warning(f"Memory load returned {resp.status}")
+        except Exception as e:
+            logging.warning(f"Memory load failed: {e}")
+    if not facts:
+        try:
+            facts = json.loads(LOCAL_MEMORY_FILE.read_text(encoding="utf-8")).get("facts", [])
+        except Exception:
+            facts = []
+    memory_cache.update(facts=list(facts), checked_at=now)
+    return list(facts)
+
+async def save_memory(facts: list) -> bool:
+    payload = json.dumps({"facts": facts}, ensure_ascii=False, indent=2)
+    if GH_TOKEN:
+        url = f"https://api.github.com/repos/{MEMORY_REPO}/contents/memory.json"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"ref": MEMORY_BRANCH}, headers=github_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    sha = (await resp.json()).get("sha") if resp.status == 200 else None
+                body = {
+                    "message": "Update San learned memory",
+                    "content": base64.b64encode(payload.encode("utf-8")).decode("ascii"),
+                    "branch": MEMORY_BRANCH,
+                }
+                if sha:
+                    body["sha"] = sha
+                async with session.put(url, json=body, headers=github_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status not in (200, 201):
+                        text = await resp.text()
+                        logging.warning(f"Memory save returned {resp.status}: {text[:120]}")
+                        return False
+        except Exception as e:
+            logging.warning(f"Memory save failed: {e}")
+            return False
+    else:
+        try:
+            LOCAL_MEMORY_FILE.write_text(payload, encoding="utf-8")
+        except Exception as e:
+            logging.warning(f"Local memory save failed: {e}")
+            return False
+    memory_cache.update(facts=list(facts), checked_at=time.time())
+    return True
 
 # ==========================================
 # AI ENGINE: MULTI-PROVIDER KEY ROTATION
@@ -402,6 +502,9 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     verified = context if context is not None else await gather_context(user_prompt)
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
+    learned = await load_memory()
+    if learned:
+        system_prompt += "\n\nOwner notes (trusted, apply them whenever relevant):\n" + "\n".join(f"- {fact}" for fact in learned[-25:])
     formatted_messages = [{"role": "system", "content": system_prompt}]
     for msg in conversation_history[channel_id]:
         formatted_messages.append(msg)
@@ -449,7 +552,7 @@ def build_about_embed() -> discord.Embed:
         "Official repo: " + OFFICIAL_REPO
     )
     embed = discord.Embed(title="About San", description=description, color=discord.Color.blurple())
-    embed.add_field(name="Commands", value="/guide, /download, /tv, /faq, /ask, /release, /showdown, /search, /about", inline=False)
+    embed.add_field(name="Commands", value="/guide, /download, /tv, /movies, /faq, /ask, /release, /showdown, /search, /about, /memory", inline=False)
     embed.add_field(name="How to talk to me", value="Mention me, reply to one of my messages, or DM me.", inline=False)
     return embed
 
@@ -578,11 +681,24 @@ GUIDE_SECTIONS = {
         "description": (
             "Sanin is an open-source media player and tracker. It **does not host or provide streams** itself.\n\n"
             "**How to Add Extensions:**\n"
-            "1. Open **Sanin** and navigate to **Settings** → **Extensions**.\n"
-            "2. Tap **Add Repository** and enter a compatible extension repository URL.\n"
-            "3. Browse the list and install the extension(s) for your preferred sources.\n"
+            "1. Open **Sanin** and go to **Settings** → **Extensions**.\n"
+            "2. Tap **Add Repository** and enter a trusted repo shortcode like `username/repo/branch`, or a raw `index.min.json` URL.\n"
+            "3. Browse the list and install the extension(s) for your preferred sources. Anime, manga, and novel repos are separate.\n"
             "4. When you select a title, Sanin uses your installed extension to resolve video streams.\n\n"
-            "💡 *If a stream fails or buffers, try changing the server or checking for extension updates.*"
+            "💡 *Only add repos you trust. If a repo won't load, try a VPN. If a stream buffers, switch server or update the extension.*"
+        ),
+        "fields": []
+    },
+    "movies": {
+        "title": "🎬 Watching Movies & TV Shows",
+        "color": discord.Color.gold(),
+        "description": (
+            "**How to watch a movie:**\n"
+            "1. Open **Movies** or **TV** from the home screen and pick a title.\n"
+            "2. Tap **Play Movie**.\n"
+            "3. If it says *No CloudStream sources installed*, go to **Settings** → **Extensions** → **Add Repository**, add a trusted source repo, and install a source extension.\n"
+            "4. Go back to the title and play again. Switch servers or extensions if a stream fails.\n\n"
+            "**Add-ons** under **Settings** → **Add-ons** → **Install Add-on** are for extra features like downloaders, not for movie streams."
         ),
         "fields": []
     },
@@ -617,6 +733,8 @@ GUIDE_SECTIONS = {
             "A: Sanin doesn't host media. If a stream doesn't load, switch to another server or extension.\n\n"
             "**Q: Can I install Sanin on Samsung or LG TV?**\n"
             "A: No, Samsung uses Tizen and LG uses webOS. You can plug in a Firestick or Chromecast with Google TV.\n\n"
+            "**Q: How do I watch movies or add a movie source?**\n"
+            "A: Open Movies, tap Play Movie, and if there's no source go to Settings → Extensions → Add Repository and install a trusted source repo. Add-ons are for extra features, not streams.\n\n"
             "**Q: Where is the source code?**\n"
             "A: It's open-source on [GitHub](https://github.com/Nashon-ops/Sanin)."
         ),
@@ -637,6 +755,7 @@ class GuideSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="Download & Install", value="download", description="How to install on Phone, TV, or Firestick", emoji="📥"),
             discord.SelectOption(label="Extensions & Sources", value="extensions", description="How to add repos and streaming extensions", emoji="🧩"),
+            discord.SelectOption(label="Movies & TV", value="movies", description="How to add a movie source and play", emoji="🎬"),
             discord.SelectOption(label="Android TV & Fire TV", value="tv", description="Using Sanin on TV with remote control", emoji="📺"),
             discord.SelectOption(label="Tracking Accounts", value="tracking", description="Connect AniList, MyAnimeList, or Simkl", emoji="📊"),
             discord.SelectOption(label="FAQ & Troubleshooting", value="faq", description="Common questions and quick answers", emoji="❓"),
@@ -722,6 +841,11 @@ async def faq_prefix_cmd(ctx):
     embed = create_guide_embed("faq")
     await ctx.send(embed=embed)
 
+@bot.command(name="movies")
+async def movies_prefix_cmd(ctx):
+    embed = create_guide_embed("movies")
+    await ctx.send(embed=embed)
+
 @bot.command(name="release")
 async def release_prefix_cmd(ctx, *, title: str):
     async with ctx.typing():
@@ -748,6 +872,47 @@ async def search_prefix_cmd(ctx, *, query: str):
 @bot.command(name="about")
 async def about_prefix_cmd(ctx):
     await ctx.reply(embed=build_about_embed())
+
+@bot.command(name="learn")
+async def learn_prefix_cmd(ctx, *, fact: str):
+    if not is_owner(ctx.author):
+        await ctx.reply("Owner only.")
+        return
+    fact = fact.strip()
+    if not fact:
+        await ctx.reply("Give me something to remember.")
+        return
+    facts = await load_memory()
+    facts.append(fact)
+    if await save_memory(facts):
+        await ctx.reply(f"Saved. I now know {len(facts)} thing(s).")
+    else:
+        await ctx.reply("Couldn't save that right now.")
+
+@bot.command(name="forget")
+async def forget_prefix_cmd(ctx, number: int):
+    if not is_owner(ctx.author):
+        await ctx.reply("Owner only.")
+        return
+    facts = await load_memory()
+    if not 1 <= number <= len(facts):
+        await ctx.reply(f"Give a number from 1 to {len(facts)}. Check with !memory.")
+        return
+    removed = facts.pop(number - 1)
+    if await save_memory(facts):
+        await ctx.reply(f"Forgot: {removed}")
+    else:
+        await ctx.reply("Couldn't save that right now.")
+
+@bot.command(name="memory")
+async def memory_prefix_cmd(ctx):
+    facts = await load_memory()
+    if not facts:
+        await ctx.reply("Nothing learned yet.")
+        return
+    lines = [f"{i}. {fact}" for i, fact in enumerate(facts, 1)]
+    for chunk in split_message("\n".join(lines)):
+        await ctx.reply(chunk)
 
 @bot.tree.command(name="ask", description="Ask San anything about Sanin or chat")
 @app_commands.describe(question="Your question for San")
@@ -780,6 +945,11 @@ async def faq_slash(interaction: discord.Interaction):
     embed = create_guide_embed("faq")
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="movies", description="How to add a movie source and watch movies")
+async def movies_slash(interaction: discord.Interaction):
+    embed = create_guide_embed("movies")
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="release", description="Estimated release date for an anime or show")
 @app_commands.describe(title="Title to look up")
 async def release_slash(interaction: discord.Interaction, title: str):
@@ -805,6 +975,53 @@ async def search_slash(interaction: discord.Interaction, query: str):
 @bot.tree.command(name="about", description="What San is and what it can do")
 async def about_slash(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_about_embed())
+
+@bot.tree.command(name="learn", description="Teach San a fact or rule (owner only)")
+@app_commands.describe(fact="What San should remember")
+async def learn_slash(interaction: discord.Interaction, fact: str):
+    if not is_owner(interaction.user):
+        await interaction.response.send_message("Owner only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    fact = fact.strip()
+    facts = await load_memory()
+    if not fact:
+        await interaction.followup.send("Give me something to remember.", ephemeral=True)
+        return
+    facts.append(fact)
+    if await save_memory(facts):
+        await interaction.followup.send(f"Saved. I now know {len(facts)} thing(s).", ephemeral=True)
+    else:
+        await interaction.followup.send("Couldn't save that right now.", ephemeral=True)
+
+@bot.tree.command(name="forget", description="Remove something San learned (owner only)")
+@app_commands.describe(number="Memory number, check with /memory")
+async def forget_slash(interaction: discord.Interaction, number: int):
+    if not is_owner(interaction.user):
+        await interaction.response.send_message("Owner only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    facts = await load_memory()
+    if not 1 <= number <= len(facts):
+        await interaction.followup.send(f"Give a number from 1 to {len(facts)}. Check with /memory.", ephemeral=True)
+        return
+    removed = facts.pop(number - 1)
+    if await save_memory(facts):
+        await interaction.followup.send(f"Forgot: {removed}", ephemeral=True)
+    else:
+        await interaction.followup.send("Couldn't save that right now.", ephemeral=True)
+
+@bot.tree.command(name="memory", description="Show what San has learned")
+async def memory_slash(interaction: discord.Interaction):
+    await interaction.response.defer()
+    facts = await load_memory()
+    if not facts:
+        await interaction.followup.send("Nothing learned yet.")
+        return
+    chunks = split_message("\n".join(f"{i}. {fact}" for i, fact in enumerate(facts, 1)))
+    await interaction.followup.send(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
 
 # ==========================================
 # HEALTH-CHECK WEB SERVER
