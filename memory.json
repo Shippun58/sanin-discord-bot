@@ -1,3 +1,5 @@
 {
-  "facts": []
+  "facts": [
+    "Test fact"
+  ]
 }
