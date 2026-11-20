@@ -79,6 +79,7 @@ Accuracy
 - "Verified data" is helpful context, not a cage. Use your own knowledge freely, especially for anime, characters, rumors, and theories.
 - Talk about rumors as rumors: what is known, what is reported, and what is still speculation. Never brush off a question just because it is not about Sanin.
 - Answer directly. If a current number is not in the data, give your best knowledge-based answer and flag it as possibly outdated instead of telling the user where to look.
+- Treat short follow-ups and replies as continuations of the conversation. When someone asks "what about X" or replies to your last message, stay on the same topic and resolve X against the previous exchange instead of answering the words literally.
 - Never fabricate a link or present a guessed release date as fact.
 """
 
@@ -105,7 +106,7 @@ def add_to_history(channel_id: int, role: str, content: str):
 # ==========================================
 # OWNER LEARNED MEMORY
 # ==========================================
-memory_cache = {"facts": None, "checked_at": 0.0}
+memory_cache = {"data": None, "checked_at": 0.0}
 
 def is_owner(user) -> bool:
     owner_id = os.getenv("OWNER_ID", "").strip()
@@ -127,34 +128,44 @@ def github_headers() -> dict:
         "User-Agent": "Sanin-Discord-Bot/1.0",
     }
 
-async def load_memory() -> list:
+def normalize_memory(data) -> dict:
+    if isinstance(data, list):
+        return {"facts": data, "users": {}}
+    if not isinstance(data, dict):
+        return {"facts": [], "users": {}}
+    data.setdefault("facts", [])
+    data.setdefault("users", {})
+    return data
+
+async def load_memory() -> dict:
     now = time.time()
-    if memory_cache["facts"] is not None and now - memory_cache["checked_at"] < 60:
-        return list(memory_cache["facts"])
-    facts = []
+    if memory_cache["data"] is not None and now - memory_cache["checked_at"] < 60:
+        return normalize_memory(memory_cache["data"])
+    data = {"facts": [], "users": {}}
     if GH_TOKEN:
         url = f"https://api.github.com/repos/{MEMORY_REPO}/contents/memory.json"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params={"ref": MEMORY_BRANCH}, headers=github_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
-                        decoded = base64.b64decode(data.get("content", "")).decode("utf-8", errors="replace")
-                        facts = json.loads(decoded).get("facts", [])
+                        raw = await resp.json()
+                        decoded = base64.b64decode(raw.get("content", "")).decode("utf-8", errors="replace")
+                        data = normalize_memory(json.loads(decoded))
                     else:
                         logging.warning(f"Memory load returned {resp.status}")
         except Exception as e:
             logging.warning(f"Memory load failed: {e}")
-    if not facts:
+    if not data["facts"] and not data["users"]:
         try:
-            facts = json.loads(LOCAL_MEMORY_FILE.read_text(encoding="utf-8")).get("facts", [])
+            data = normalize_memory(json.loads(LOCAL_MEMORY_FILE.read_text(encoding="utf-8")))
         except Exception:
-            facts = []
-    memory_cache.update(facts=list(facts), checked_at=now)
-    return list(facts)
+            pass
+    memory_cache.update(data=data, checked_at=now)
+    return normalize_memory(data)
 
-async def save_memory(facts: list) -> bool:
-    payload = json.dumps({"facts": facts}, ensure_ascii=False, indent=2)
+async def save_memory(data: dict) -> bool:
+    data = normalize_memory(data)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
     if GH_TOKEN:
         url = f"https://api.github.com/repos/{MEMORY_REPO}/contents/memory.json"
         try:
@@ -182,8 +193,34 @@ async def save_memory(facts: list) -> bool:
         except Exception as e:
             logging.warning(f"Local memory save failed: {e}")
             return False
-    memory_cache.update(facts=list(facts), checked_at=time.time())
+    memory_cache.update(data=data, checked_at=time.time())
     return True
+
+def extract_user_fact(content: str) -> str:
+    text = content.strip()
+    low = text.lower()
+    for marker in ("remember that ", "remember "):
+        if low.startswith(marker):
+            rest = text[len(marker):].strip().rstrip(".!").strip()
+            if 3 <= len(rest) <= 100:
+                return rest
+    match = re.match(r"^i (?:really )?(like|love|enjoy|prefer|hate|dislike)\s+(.{3,80})$", text, re.I)
+    if match:
+        verb, thing = match.group(1).lower(), match.group(2).strip().rstrip(".!")
+        return f"likes {thing}" if verb in ("like", "love", "enjoy", "prefer") else f"dislikes {thing}"
+    return ""
+
+async def remember_user(user, fact: str) -> bool:
+    fact = fact.strip()
+    if not fact:
+        return False
+    data = await load_memory()
+    entry = data["users"].setdefault(str(user.id), {"name": getattr(user, "display_name", str(user)), "facts": []})
+    entry["name"] = getattr(user, "display_name", entry.get("name", str(user)))
+    if fact in entry["facts"]:
+        return False
+    entry["facts"] = (entry["facts"] + [fact])[-20:]
+    return await save_memory(data)
 
 # ==========================================
 # AI ENGINE: MULTI-PROVIDER KEY ROTATION
@@ -491,29 +528,34 @@ async def query_gemini(api_key: str, messages: list) -> str:
             logging.warning(f"Gemini {m} failed: {e}")
     raise Exception("All Gemini models failed")
 
-async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, context: str | None = None) -> str:
+async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, context: str | None = None, user_id: int | None = None) -> str:
     global groq_key_index
 
+    session_key = f"{channel_id}:{user_id or user_name}"
     canned = canonical_reply(user_prompt)
     if canned:
-        add_to_history(channel_id, "user", user_prompt)
-        add_to_history(channel_id, "assistant", canned)
+        add_to_history(session_key, "user", user_prompt)
+        add_to_history(session_key, "assistant", canned)
         return canned
 
     verified = context if context is not None else await gather_context(user_prompt)
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
-    learned = await load_memory()
-    if learned:
-        system_prompt += "\n\nOwner notes (trusted, apply them whenever relevant):\n" + "\n".join(f"- {fact}" for fact in learned[-25:])
+    memory = await load_memory()
+    if memory["facts"]:
+        system_prompt += "\n\nOwner notes (trusted, apply them whenever relevant):\n" + "\n".join(f"- {fact}" for fact in memory["facts"][-25:])
+    if user_id:
+        user_entry = memory["users"].get(str(user_id))
+        if user_entry and user_entry.get("facts"):
+            system_prompt += f"\n\nAbout {user_name} (remembered):\n" + "\n".join(f"- {fact}" for fact in user_entry["facts"][-20:])
     formatted_messages = [{"role": "system", "content": system_prompt}]
-    for msg in conversation_history[channel_id]:
+    for msg in conversation_history[session_key]:
         formatted_messages.append(msg)
     formatted_messages.append({"role": "user", "content": f"{user_name}: {user_prompt}"})
 
     async def finish(reply: str) -> str:
         reply = clean_reply(reply)
-        add_to_history(channel_id, "user", user_prompt)
-        add_to_history(channel_id, "assistant", reply)
+        add_to_history(session_key, "user", user_prompt)
+        add_to_history(session_key, "assistant", reply)
         return reply
 
     if GROQ_KEYS:
@@ -793,18 +835,30 @@ async def on_message(message: discord.Message):
         return
 
     is_mentioned = bot.user in message.mentions
-    is_reply_to_bot = (message.reference and message.reference.resolved and 
-                       isinstance(message.reference.resolved, discord.Message) and 
-                       message.reference.resolved.author == bot.user)
+    is_reply_to_bot = False
+    reply_context = ""
+    if message.reference:
+        try:
+            referenced = message.reference.resolved or await message.channel.fetch_message(message.reference.message_id)
+            if referenced and referenced.author == bot.user:
+                is_reply_to_bot = True
+                reply_context = referenced.clean_content.strip()
+        except Exception:
+            pass
     is_dm = isinstance(message.channel, discord.DMChannel)
 
     if is_mentioned or is_reply_to_bot or is_dm:
         clean = message.clean_content.replace(f"@{bot.user.name}", "").strip()
         if not clean:
             clean = "Hello!"
+        if reply_context:
+            clean = f"Replying to your previous message '{reply_context}'. Follow-up: {clean}"
+        fact = extract_user_fact(message.clean_content)
+        if fact:
+            await remember_user(message.author, fact)
 
         async with message.channel.typing():
-            reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean)
+            reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean, user_id=message.author.id)
             chunks = split_message(reply_text)
             if chunks:
                 await message.reply(chunks[0])
@@ -878,14 +932,21 @@ async def learn_prefix_cmd(ctx, *, fact: str):
     if not is_owner(ctx.author):
         await ctx.reply("Owner only.")
         return
+    target = ctx.message.mentions[0] if ctx.message.mentions else None
+    if target:
+        fact = re.sub(r"^<@!?\d+>\s*", "", fact).strip()
     fact = fact.strip()
     if not fact:
         await ctx.reply("Give me something to remember.")
         return
-    facts = await load_memory()
-    facts.append(fact)
-    if await save_memory(facts):
-        await ctx.reply(f"Saved. I now know {len(facts)} thing(s).")
+    data = await load_memory()
+    if target:
+        entry = data["users"].setdefault(str(target.id), {"name": target.display_name, "facts": []})
+        entry["facts"].append(fact)
+    else:
+        data["facts"].append(fact)
+    if await save_memory(data):
+        await ctx.reply(f"Saved for {target.display_name if target else 'everyone'}.")
     else:
         await ctx.reply("Couldn't save that right now.")
 
@@ -894,23 +955,33 @@ async def forget_prefix_cmd(ctx, number: int):
     if not is_owner(ctx.author):
         await ctx.reply("Owner only.")
         return
-    facts = await load_memory()
+    data = await load_memory()
+    target = ctx.message.mentions[0] if ctx.message.mentions else None
+    facts = data["users"].get(str(target.id), {}).get("facts", []) if target else data["facts"]
     if not 1 <= number <= len(facts):
         await ctx.reply(f"Give a number from 1 to {len(facts)}. Check with !memory.")
         return
     removed = facts.pop(number - 1)
-    if await save_memory(facts):
+    if await save_memory(data):
         await ctx.reply(f"Forgot: {removed}")
     else:
         await ctx.reply("Couldn't save that right now.")
 
 @bot.command(name="memory")
 async def memory_prefix_cmd(ctx):
-    facts = await load_memory()
-    if not facts:
+    data = await load_memory()
+    target = ctx.message.mentions[0] if ctx.message.mentions else ctx.author
+    lines = []
+    if data["facts"]:
+        lines.append("General")
+        lines.extend(f"{i}. {fact}" for i, fact in enumerate(data["facts"], 1))
+    entry = data["users"].get(str(target.id))
+    if entry and entry.get("facts"):
+        lines.append(entry.get("name", "User"))
+        lines.extend(f"{i}. {fact}" for i, fact in enumerate(entry["facts"], 1))
+    if not lines:
         await ctx.reply("Nothing learned yet.")
         return
-    lines = [f"{i}. {fact}" for i, fact in enumerate(facts, 1)]
     for chunk in split_message("\n".join(lines)):
         await ctx.reply(chunk)
 
@@ -918,7 +989,10 @@ async def memory_prefix_cmd(ctx):
 @app_commands.describe(question="Your question for San")
 async def ask_slash(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
-    reply = await get_ai_response(interaction.channel_id, interaction.user.display_name, question)
+    fact = extract_user_fact(question)
+    if fact:
+        await remember_user(interaction.user, fact)
+    reply = await get_ai_response(interaction.channel_id, interaction.user.display_name, question, user_id=interaction.user.id)
     chunks = split_message(reply)
     if chunks:
         await interaction.followup.send(chunks[0])
@@ -977,48 +1051,63 @@ async def about_slash(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_about_embed())
 
 @bot.tree.command(name="learn", description="Teach San a fact or rule (owner only)")
-@app_commands.describe(fact="What San should remember")
-async def learn_slash(interaction: discord.Interaction, fact: str):
+@app_commands.describe(fact="What San should remember", user="Store this for a specific user")
+async def learn_slash(interaction: discord.Interaction, fact: str, user: discord.User | None = None):
     if not is_owner(interaction.user):
         await interaction.response.send_message("Owner only.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     fact = fact.strip()
-    facts = await load_memory()
     if not fact:
         await interaction.followup.send("Give me something to remember.", ephemeral=True)
         return
-    facts.append(fact)
-    if await save_memory(facts):
-        await interaction.followup.send(f"Saved. I now know {len(facts)} thing(s).", ephemeral=True)
+    data = await load_memory()
+    if user:
+        entry = data["users"].setdefault(str(user.id), {"name": user.display_name, "facts": []})
+        entry["facts"].append(fact)
+    else:
+        data["facts"].append(fact)
+    if await save_memory(data):
+        await interaction.followup.send(f"Saved for {user.display_name if user else 'everyone'}.", ephemeral=True)
     else:
         await interaction.followup.send("Couldn't save that right now.", ephemeral=True)
 
 @bot.tree.command(name="forget", description="Remove something San learned (owner only)")
-@app_commands.describe(number="Memory number, check with /memory")
-async def forget_slash(interaction: discord.Interaction, number: int):
+@app_commands.describe(number="Memory number, check with /memory", user="Forget a fact about this user")
+async def forget_slash(interaction: discord.Interaction, number: int, user: discord.User | None = None):
     if not is_owner(interaction.user):
         await interaction.response.send_message("Owner only.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    facts = await load_memory()
+    data = await load_memory()
+    facts = data["users"].get(str(user.id), {}).get("facts", []) if user else data["facts"]
     if not 1 <= number <= len(facts):
         await interaction.followup.send(f"Give a number from 1 to {len(facts)}. Check with /memory.", ephemeral=True)
         return
     removed = facts.pop(number - 1)
-    if await save_memory(facts):
+    if await save_memory(data):
         await interaction.followup.send(f"Forgot: {removed}", ephemeral=True)
     else:
         await interaction.followup.send("Couldn't save that right now.", ephemeral=True)
 
 @bot.tree.command(name="memory", description="Show what San has learned")
-async def memory_slash(interaction: discord.Interaction):
+@app_commands.describe(user="Show this user's remembered facts")
+async def memory_slash(interaction: discord.Interaction, user: discord.User | None = None):
     await interaction.response.defer()
-    facts = await load_memory()
-    if not facts:
+    data = await load_memory()
+    target = user or interaction.user
+    lines = []
+    if data["facts"]:
+        lines.append("General")
+        lines.extend(f"{i}. {fact}" for i, fact in enumerate(data["facts"], 1))
+    entry = data["users"].get(str(target.id))
+    if entry and entry.get("facts"):
+        lines.append(entry.get("name", "User"))
+        lines.extend(f"{i}. {fact}" for i, fact in enumerate(entry["facts"], 1))
+    if not lines:
         await interaction.followup.send("Nothing learned yet.")
         return
-    chunks = split_message("\n".join(f"{i}. {fact}" for i, fact in enumerate(facts, 1)))
+    chunks = split_message("\n".join(lines))
     await interaction.followup.send(chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
