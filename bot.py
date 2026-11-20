@@ -51,18 +51,17 @@ Identity and links
 
 Personality
 - You are a chill, sharp anime and TV nerd who talks like a knowledgeable friend.
-- Friendly, concise, and a little witty. Have real opinions when asked, but call them opinions.
-- Help people settle debates with facts, compare titles, and explain release info using verified data.
+- Friendly and a little witty. Have real opinions, call them opinions, and enjoy a good debate.
+- You are a community AI: chat freely, riff on theories, settle arguments, and help with Sanin questions.
 
 Formatting
-- Plain Discord markdown only. Short paragraphs or up to four short bullets.
-- No ASCII art, divider lines, rows of dashes, pipes or arrows, tables, or banners.
-- At most one emoji per reply. Stay under 500 words.
+- Plain Discord markdown. No ASCII art, divider lines, rows of dashes, pipes or arrows, tables, or banners.
+- Write however reads best; no need for heavy formatting.
 
 Accuracy
-- Use only the "Verified data" block for current facts, dates, scores, and links.
-- If that block has nothing relevant, say you do not have reliable data and suggest /release, /showdown, or /search.
-- Never guess a release date and never make up a source.
+- Use the "Verified data" block when current facts, dates, scores, or links matter.
+- You can reason freely from your own knowledge for opinions, theories, and character debates; say when you are unsure.
+- Never fabricate a link or present a guessed release date as fact. The official links above are the only Sanin links.
 """
 
 APP_INFO = {
@@ -96,7 +95,7 @@ async def query_groq(api_key: str, model: str, messages: list) -> str:
         "model": model,
         "messages": messages,
         "temperature": 0.7,
-        "max_tokens": 450
+        "max_tokens": 1200
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -118,6 +117,17 @@ ANILIST_QUERY = """query ($q: String) {
       nextAiringEpisode { airingAt episode }
       genres
     }
+  }
+}"""
+
+ANILIST_CHARACTER_QUERY = """query ($q: String) {
+  Character(search: $q) {
+    id
+    name { full native }
+    favourites
+    siteUrl
+    description
+    media(sort: POPULARITY_DESC, perPage: 3) { nodes { title { romaji english } } }
   }
 }"""
 
@@ -161,7 +171,7 @@ def format_date(value) -> str:
 def extract_title(prompt: str) -> str:
     text = re.sub(r"^(hey|hi|hello|san)\b[,\s]+", "", prompt.strip(), flags=re.I)
     text = re.sub(r"[?].*$", "", text)
-    leading = r"^(what|when|who|how|is|are|does|do|can|could|would|should|tell me about|info on|information on|estimate|release date of|created|made by|the|a|an|of)\b[\s:]*"
+    leading = r"^(who would win|who wins|would win|what|when|who|how|is|are|does|do|can|could|would|should|win|wins|winner|stronger|better|tell me about|info on|information on|estimate|release date of|created|made by|the|a|an|of)\b[\s:]*"
     while True:
         updated = re.sub(leading, "", text, flags=re.I)
         if updated == text:
@@ -185,6 +195,39 @@ async def anilist_search(title: str) -> list:
                 raise Exception(f"AniList HTTP {resp.status}")
             data = await resp.json(content_type=None)
     return (data.get("data") or {}).get("Page", {}).get("media") or []
+
+async def anilist_character(name: str) -> dict | None:
+    payload = {"query": ANILIST_CHARACTER_QUERY, "variables": {"q": name}}
+    async with aiohttp.ClientSession() as session:
+        async with session.post("https://graphql.anilist.co", json=payload, headers={"User-Agent": "SanBot/1.0"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status != 200:
+                raise Exception(f"AniList character HTTP {resp.status}")
+            data = await resp.json(content_type=None)
+    return (data.get("data") or {}).get("Character")
+
+def clean_markup(text: str | None) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"<br\s*/?>", " ", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    return " ".join(text.replace("__", "").replace("*", "").replace("~!", "").replace("!~", "").split())
+
+def compact_character(item: dict | None) -> dict:
+    if not item:
+        return {}
+    names = item.get("name") or {}
+    nodes = ((item.get("media") or {}).get("nodes") or [])[:3]
+    series = []
+    for node in nodes:
+        titles = node.get("title") or {}
+        series.append(titles.get("english") or titles.get("romaji"))
+    return {
+        "name": names.get("full") or names.get("native"),
+        "favourites": item.get("favourites"),
+        "series": series,
+        "url": item.get("siteUrl"),
+        "description": clean_markup(item.get("description"))[:320],
+    }
 
 async def tmdb_search(title: str, kind: str = "tv") -> list:
     if not TMDB_API_KEY:
@@ -256,16 +299,23 @@ def compact_tmdb(items: list) -> list:
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
     parts = [f"Official Sanin repository: {OFFICIAL_REPO}", f"Official downloads: {RELEASES_URL}"]
-    title = extract_title(prompt)
-    if len(title) < 3:
-        return "\n".join(parts)
     jobs = []
-    if any(k in lower for k in ("anime", "show", "movie", "series", "release", "air", "episode", "score", "vs", "compare", "better", "season", "when")):
-        jobs.append(("anilist", anilist_search(title)))
-        if TMDB_API_KEY:
-            jobs.append(("tmdb", tmdb_search(title)))
-    if any(k in lower for k in ("what", "who", "when", "where", "why", "how", "latest", "news", "current", "update", "search")):
-        jobs.append(("wiki", wiki_search(title)))
+    if any(k in lower for k in (" vs ", " versus ", "showdown", "who would win", "character", "debate")):
+        sides = re.split(r"\s+(?:vs\.?|versus)\s+", prompt, maxsplit=1, flags=re.I)
+        for side in sides[:2]:
+            name = extract_title(side)
+            if len(name) >= 2:
+                jobs.append((f"character:{name}", anilist_character(name)))
+                jobs.append((f"charwiki:{name}", wiki_search(name)))
+    else:
+        title = extract_title(prompt)
+        if len(title) >= 3:
+            if any(k in lower for k in ("anime", "show", "movie", "series", "release", "air", "episode", "score", "compare", "better", "season", "when")):
+                jobs.append(("anilist", anilist_search(title)))
+                if TMDB_API_KEY:
+                    jobs.append(("tmdb", tmdb_search(title)))
+            if any(k in lower for k in ("what", "who", "when", "where", "why", "how", "latest", "news", "current", "update", "search")):
+                jobs.append(("wiki", wiki_search(title)))
     if not jobs:
         return "\n".join(parts)
     results = await asyncio.gather(*(job[1] for job in jobs), return_exceptions=True)
@@ -273,7 +323,14 @@ async def gather_context(prompt: str) -> str:
         if isinstance(result, Exception):
             logging.warning(f"{name} lookup failed: {result}")
             continue
-        if name == "anilist" and result:
+        if name.startswith("character:"):
+            data = compact_character(result)
+            if data:
+                parts.append(f"Character {name.split(':', 1)[1]} via AniList: " + json.dumps(data, ensure_ascii=False))
+        elif name.startswith("charwiki:"):
+            if result:
+                parts.append(f"Character {name.split(':', 1)[1]} via Wikipedia: " + json.dumps(result[:2], ensure_ascii=False))
+        elif name == "anilist" and result:
             parts.append("AniList: " + json.dumps(compact_anilist(result), ensure_ascii=False))
         elif name == "tmdb" and result:
             parts.append("TMDB: " + json.dumps(compact_tmdb(result), ensure_ascii=False))
@@ -289,7 +346,7 @@ async def query_gemini(api_key: str, messages: list) -> str:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
             payload = {
                 "contents": [{"parts": [{"text": prompt_text}]}],
-                "generationConfig": {"maxOutputTokens": 450, "temperature": 0.7}
+                "generationConfig": {"maxOutputTokens": 1200, "temperature": 0.7}
             }
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=12)) as resp:
@@ -346,7 +403,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     elif any(k in lower for k in ["samsung", "tizen", "lg"]):
         reply = "Samsung and LG TVs can't install Android APKs directly. Use a Firestick, Chromecast with Google TV, or an Android TV box."
     else:
-        reply = f"Hey {user_name}, I'm San. I can help with Sanin, release estimates, title comparisons, and web lookups. Try /guide, /release, /showdown, or /search."
+        reply = f"Hey {user_name}, I'm San. I can help with Sanin, release estimates, character showdowns, and web lookups. Try /guide, /release, /showdown, or /search."
     add_to_history(channel_id, "user", user_prompt)
     add_to_history(channel_id, "assistant", reply)
     return reply
@@ -354,7 +411,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 def build_about_embed() -> discord.Embed:
     description = (
         "I'm San, the Sanin community AI. I'm a chill anime and TV nerd who keeps things short, "
-        "helps settle debates with real data, and never guesses a release date or invents a link.\n\n"
+        "settles character debates with data and reasoning, and never invents links or dates.\n\n"
         "Official repo: " + OFFICIAL_REPO
     )
     embed = discord.Embed(title="About San", description=description, color=discord.Color.blurple())
@@ -399,62 +456,43 @@ async def build_release_embed(title: str) -> discord.Embed:
     description = "\n\n".join(lines) if lines else "No reliable match found. Try a more specific title."
     return discord.Embed(title=f"Release estimate: {title}", description=description, color=discord.Color.blurple())
 
-async def fetch_side(title: str) -> dict:
-    anime_task = anilist_search(title)
-    tmdb_task = tmdb_search(title) if TMDB_API_KEY else asyncio.sleep(0, result=[])
-    anime, tv = await asyncio.gather(anime_task, tmdb_task, return_exceptions=True)
-    side = {"title": title, "anime": None, "tmdb": None}
-    if not isinstance(anime, Exception) and anime:
-        side["anime"] = anime[0]
-    if not isinstance(tv, Exception) and tv:
-        try:
-            side["tmdb"] = await tmdb_details(tv[0])
-        except Exception as e:
-            logging.warning(f"TMDB details failed: {e}")
-            side["tmdb"] = tv[0]
+async def fetch_character_side(name: str) -> dict:
+    jobs = [("anilist", anilist_character(name)), ("wiki", wiki_search(name))]
+    results = await asyncio.gather(*(job[1] for job in jobs), return_exceptions=True)
+    side = {"query": name, "anilist": {}, "wiki": []}
+    for (label, _), result in zip(jobs, results):
+        if isinstance(result, Exception):
+            logging.warning(f"{label} character lookup failed: {result}")
+            continue
+        if label == "anilist":
+            side["anilist"] = compact_character(result)
+        elif label == "wiki":
+            side["wiki"] = result[:2]
     return side
 
-def side_summary(side: dict) -> dict:
-    item = side.get("anime")
-    if item:
-        names = item.get("title") or {}
-        return {
-            "name": names.get("english") or names.get("romaji") or side["title"],
-            "score": f"{item['averageScore']}%" if item.get("averageScore") is not None else "n/a",
-            "popularity": f"{item['popularity']:,}" if item.get("popularity") else "n/a",
-            "episodes": item.get("episodes") or "?",
-            "status": STATUS_LABELS.get(item.get("status"), "Unknown"),
-            "url": item.get("siteUrl"),
-            "source": "AniList",
-        }
-    item = side.get("tmdb")
-    if item:
-        kind = item.get("_kind", "tv")
-        return {
-            "name": item.get("name") or item.get("title") or side["title"],
-            "score": f"{item['vote_average']}/10" if item.get("vote_average") is not None else "n/a",
-            "popularity": f"{item['popularity']:,}" if item.get("popularity") else "n/a",
-            "episodes": item.get("number_of_episodes") or "?",
-            "status": item.get("status", "Unknown"),
-            "url": f"https://www.themoviedb.org/{kind}/{item.get('id')}",
-            "source": "TMDB",
-        }
-    return {"name": side["title"], "score": "n/a", "popularity": "n/a", "episodes": "?", "status": "Unknown", "url": "", "source": "none"}
-
-def summary_line(label: str, data: dict) -> str:
-    return f"**{label}** {data['name']} ({data['source']})\nScore {data['score']} | Popularity {data['popularity']} | {data['episodes']} episodes | {data['status']}\n{data['url']}"
+def character_line(side: dict) -> str:
+    data = side["anilist"]
+    name = data.get("name") or side["query"]
+    favourites = f"{data['favourites']:,}" if data.get("favourites") else "n/a"
+    series = ", ".join(data.get("series") or []) or "unknown"
+    lines = [f"**{name}**", f"AniList favourites: {favourites} | From: {series}"]
+    if data.get("description"):
+        lines.append(data["description"][:220])
+    if data.get("url"):
+        lines.append(data["url"])
+    for item in side.get("wiki") or []:
+        lines.append(f"Wikipedia: {item['title']} — {item['snippet'][:160]}")
+    return "\n".join(lines)
 
 async def build_showdown_embed(first: str, second: str, channel_id: int) -> discord.Embed:
-    left, right = await asyncio.gather(fetch_side(first), fetch_side(second))
-    a = side_summary(left)
-    b = side_summary(right)
-    description = summary_line(first, a) + "\n\n" + summary_line(second, b)
-    context = "Verified data: " + json.dumps({"first": a, "second": b}, ensure_ascii=False)
+    left, right = await asyncio.gather(fetch_character_side(first), fetch_character_side(second))
+    description = character_line(left) + "\n\n" + character_line(right)
+    context = "Character data: " + json.dumps({"first": left, "second": right}, ensure_ascii=False)
     try:
         verdict = await get_ai_response(
             channel_id,
             "San",
-            f"Give a short friendly verdict comparing {a['name']} and {b['name']} using only the verified data. Under 80 words.",
+            f"Give your honest, reasoned verdict on {first} vs {second}. Use the character data and your own knowledge of these characters, label it as your opinion, and never invent links or dates.",
             context=context,
         )
         description += "\n\n" + verdict
@@ -647,10 +685,10 @@ async def release_prefix_cmd(ctx, *, title: str):
         await ctx.reply(embed=await build_release_embed(title))
 
 @bot.command(name="showdown")
-async def showdown_prefix_cmd(ctx, *, titles: str):
-    parts = re.split(r"\s+(?:vs\.?|versus)\s+", titles, maxsplit=1, flags=re.I)
+async def showdown_prefix_cmd(ctx, *, characters: str):
+    parts = re.split(r"\s+(?:vs\.?|versus)\s+", characters, maxsplit=1, flags=re.I)
     if len(parts) != 2:
-        await ctx.reply("Use: !showdown Title A vs Title B")
+        await ctx.reply("Use: !showdown Character A vs Character B")
         return
     async with ctx.typing():
         await ctx.reply(embed=await build_showdown_embed(parts[0].strip(), parts[1].strip(), ctx.channel.id))
@@ -701,8 +739,8 @@ async def release_slash(interaction: discord.Interaction, title: str):
     await interaction.response.defer()
     await interaction.followup.send(embed=await build_release_embed(title))
 
-@bot.tree.command(name="showdown", description="Compare two titles and settle a debate")
-@app_commands.describe(first="First title", second="Second title")
+@bot.tree.command(name="showdown", description="Settle a character debate with data and a reasoned opinion")
+@app_commands.describe(first="First character", second="Second character")
 async def showdown_slash(interaction: discord.Interaction, first: str, second: str):
     await interaction.response.defer()
     await interaction.followup.send(embed=await build_showdown_embed(first, second, interaction.channel_id))
