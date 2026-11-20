@@ -84,6 +84,9 @@ Sanin support
 - If someone gives a specific bug, answer with the smallest useful steps. Do not ask if they want help.
 - If someone only says they are stuck, lost, or something is not working, ask one short question about the exact screen, error, or mode. Do not dump the manual or list every possible fix.
 - Use the support manual only when it directly matches the reported issue. Never paste or summarize whole manual sections.
+- Adult/NSFW content is supported by Sanin when enabled. If asked how to enable it or why it is hidden, give the exact toggles from the manual. Do not refuse, moralize, or pretend the feature does not exist.
+- For adult title recommendations, give a short list of titles that fit the request and label them NSFW. Use AniList adult anime data for anime and live results for movies/TV. Keep descriptions non-explicit; no graphic sexual detail.
+- For NSFW repos or plugins, use the same repo search and verification flow. List plugin names only when they came from the verified manifest.
 - Identify mode (Anime or Movie & TV), device, and whether audio and controls work only when it changes the fix. Do not interrogate them.
 - Black video in Anime: switch server/source first, then Settings > Playback & App Behaviour > Player & Sync > Player Settings > Video, Video output to TextureView, then Decoder to Hardware+, then Software. Clear cache if relevant, never clear app data.
 - Black video in Movie & TV: switch server/source/quality first. Anime Decoder and Video output do not apply to that player.
@@ -164,8 +167,8 @@ def load_manual_sections() -> list:
 MANUAL_STOPWORDS = {"about", "after", "again", "could", "does", "from", "have", "into", "just", "like", "make", "more", "most", "much", "only", "other", "please", "sanin", "should", "some", "that", "there", "they", "this", "very", "what", "when", "where", "which", "with", "would", "your"}
 
 MANUAL_RULES = (
+    ("11.", r"\b(nsfw|adult(?: content| only)?|hide private|extensions?|add-?ons?|plugins?|repos?|repositories?|aniyomi|cloudstream|stremio)\b"),
     ("19.", r"\b(logs?|logging|diagnostics?)\b"),
-    ("11.", r"\b(extensions?|add-?ons?|plugins?|repos?|repositories?|aniyomi|cloudstream|stremio)\b"),
     ("12.", r"\b(downloads?|offline)\b"),
     ("14.", r"\b(audio|sound|voice|subtitles?|subs|captions?|sync)\b"),
     ("13.", r"\b(black|video|player|playback|decoder|buffer|stutter|server|quality)\b"),
@@ -184,12 +187,16 @@ def manual_context(prompt: str) -> str:
     if not sections:
         return ""
     lower = prompt.lower()
-    support_words = ("sanin", "player", "extension", "source", "add-on", "addon", "black", "video", "audio", "subtitle", "crash", "error", "buffer", "install", "update", "apk", "fire tv", "android tv", "settings", "tracker", "log", "stremio", "cloudstream", "movie & tv")
+    support_words = ("sanin", "player", "extension", "source", "add-on", "addon", "nsfw", "adult", "black", "video", "audio", "subtitle", "crash", "error", "buffer", "install", "update", "apk", "fire tv", "android tv", "settings", "tracker", "log", "stremio", "cloudstream", "movie & tv")
     if not any(word in lower for word in support_words):
         return ""
+    nsfw = any(k in lower for k in ("nsfw", "adult", "hentai", "explicit"))
+    title_rec = nsfw and any(k in lower for k in ("recommend", "suggest", "title", "titles", "watch", "give me", "show me"))
     chosen = []
     seen = set()
     for prefix, pattern in MANUAL_RULES:
+        if prefix == "11." and title_rec and not any(k in lower for k in ("extension", "addon", "add-on", "plugin", "repo")):
+            continue
         if not re.search(pattern, lower):
             continue
         section = next((s for s in sections if s["title"].startswith(prefix)), None)
@@ -409,6 +416,15 @@ ANILIST_QUERY = """query ($q: String, $type: MediaType) {
   }
 }"""
 
+ANILIST_ADULT_QUERY = """query {
+  Page(perPage: 5) {
+    media(type: ANIME, isAdult: true, sort: POPULARITY_DESC) {
+      title { romaji english }
+      averageScore popularity siteUrl
+    }
+  }
+}"""
+
 ANILIST_CHARACTER_QUERY = """query ($q: String) {
   Character(search: $q) {
     id
@@ -517,6 +533,15 @@ async def anilist_search(title: str, media_type: str = "ANIME") -> list:
         async with session.post("https://graphql.anilist.co", json=payload, headers={"User-Agent": "SanBot/1.0"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
             if resp.status != 200:
                 raise Exception(f"AniList HTTP {resp.status}")
+            data = await resp.json(content_type=None)
+    return (data.get("data") or {}).get("Page", {}).get("media") or []
+
+async def anilist_adult() -> list:
+    payload = {"query": ANILIST_ADULT_QUERY}
+    async with aiohttp.ClientSession() as session:
+        async with session.post("https://graphql.anilist.co", json=payload, headers={"User-Agent": "SanBot/1.0"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status != 200:
+                raise Exception(f"AniList adult HTTP {resp.status}")
             data = await resp.json(content_type=None)
     return (data.get("data") or {}).get("Page", {}).get("media") or []
 
@@ -641,7 +666,7 @@ def is_public_repo_url(url: str) -> bool:
 
 async def inspect_repo(url: str) -> dict:
     url = url.strip().rstrip(".,;")
-    result = {"url": url, "ok": False, "count": 0, "valid_urls": 0, "sample": "", "error": ""}
+    result = {"url": url, "ok": False, "count": 0, "valid_urls": 0, "names": [], "sample": "", "error": ""}
     if not is_public_repo_url(url):
         result["error"] = "not a public http(s) URL"
         return result
@@ -680,7 +705,8 @@ async def inspect_repo(url: str) -> dict:
         ok=True,
         count=len(items),
         valid_urls=sum(1 for item in items if isinstance(item, dict) and str(item.get("url", "")).startswith("http")),
-        sample=", ".join(names[:8]) if names else "no named entries",
+        names=names,
+        sample=", ".join(names[:8]),
     )
     return result
 
@@ -688,7 +714,8 @@ async def test_repo(url: str) -> str:
     result = await inspect_repo(url)
     if not result["ok"]:
         return f"Repo check failed: {result['error']}."
-    return f"Repo OK: {result['count']} entries, {result['valid_urls']} with valid plugin URLs. Sample: {result['sample']}"
+    suffix = f" Sample: {result['sample']}" if result.get("sample") else ""
+    return f"Repo OK: {result['count']} entries, {result['valid_urls']} with valid plugin URLs.{suffix}"
 
 def extract_repo_urls(text: str) -> list:
     text = unescape(text or "")
@@ -714,6 +741,8 @@ def asks_extension_repo(prompt: str) -> bool:
         return True
     if REPO_URL_RE.search(prompt):
         return any(k in lower for k in ("test", "check", "valid", "work", "broken"))
+    if any(k in lower for k in ("nsfw", "adult", "hentai")) and any(k in lower for k in ("extension", "addon", "add-on", "plugin")):
+        return True
     return "extension" in lower and any(k in lower for k in ("find", "recommend", "suggest", "which", "best", "good", "working"))
 
 def compact_anilist(items: list) -> list:
@@ -813,7 +842,18 @@ def repo_relevance_score(item: dict, prompt: str) -> int:
     haystack = f"{item.get('title', '')} {item.get('snippet', '')}".lower()
     return sum(1 for word in words if word in haystack)
 
-def format_repo_checks(checks: list) -> str | None:
+def pick_plugin_names(names: list, prompt: str) -> list:
+    lower = prompt.lower()
+    if any(k in lower for k in ("nsfw", "adult", "hentai", "18+")):
+        filtered = [
+            name for name in names
+            if any(k in name.lower() for k in ("nsfw", "adult", "hentai", "18", "xxx", "jav", "porn"))
+        ]
+        if filtered:
+            return filtered
+    return names
+
+def format_repo_checks(checks: list, prompt: str = "") -> str | None:
     verified = [check for check in checks if check.get("ok")]
     unverified = [check for check in checks if not check.get("ok")]
     if not verified and not unverified:
@@ -822,8 +862,9 @@ def format_repo_checks(checks: list) -> str | None:
     if verified:
         first = verified[0]
         lines.append(f"Here's one I verified: {first['url']} ({first['count']} plugins).")
-        if first.get("sample"):
-            lines.append(f"Includes: {first['sample']}.")
+        names = pick_plugin_names(first.get("names", []), prompt)
+        if names:
+            lines.append("Plugins: " + ", ".join(names[:8]))
         if len(verified) > 1:
             lines.append("Also verified: " + ", ".join(check["url"] for check in verified[1:3]))
     else:
@@ -891,7 +932,7 @@ async def repo_recommendation(prompt: str) -> str | None:
         return None
     checks = await asyncio.gather(*(inspect_repo(url) for url in candidates), return_exceptions=True)
     clean_checks = [check for check in checks if isinstance(check, dict)]
-    return format_repo_checks(clean_checks)
+    return format_repo_checks(clean_checks, prompt)
 
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
@@ -899,6 +940,12 @@ async def gather_context(prompt: str) -> str:
     jobs = []
     if len(prompt.split()) >= 2 and not re.fullmatch(r"(hi|hello|hey|yo|thanks|thank you|ok|okay)[!. ]*", lower):
         jobs.append(("web", web_search(prompt)))
+    if (
+        any(k in lower for k in ("nsfw", "adult", "hentai", "explicit"))
+        and any(k in lower for k in ("recommend", "suggest", "title", "titles", "watch", "give me", "show me"))
+        and "anime" in lower
+    ):
+        jobs.append(("adult_anime", anilist_adult()))
     if any(k in lower for k in (" vs ", " versus ", "showdown", "who would win", "character", "debate")):
         sides = re.split(r"\s+(?:vs\.?|versus)\s+", prompt, maxsplit=1, flags=re.I)
         for side in sides[:2]:
@@ -942,6 +989,8 @@ async def gather_context(prompt: str) -> str:
             parts.append(result)
         elif name == "web" and result:
             parts.append("Web search results (use these facts to answer; do not dump the list): " + json.dumps(result, ensure_ascii=False))
+        elif name == "adult_anime" and result:
+            parts.append("AniList adult anime (label NSFW; titles/scores only, no explicit descriptions): " + json.dumps(compact_anilist(result), ensure_ascii=False))
     return "\n".join(parts) if parts else "No preloaded data for this topic; answer from your own knowledge."
 
 async def query_gemini(api_key: str, messages: list) -> str:
