@@ -79,6 +79,22 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.TransformerError):
+        try:
+            await interaction.response.send_message("Couldn't resolve that member or user. Use @mention, their username, or their user ID.", ephemeral=True)
+        except Exception:
+            pass
+        return
+    if isinstance(error, app_commands.MissingPermissions):
+        try:
+            await interaction.response.send_message("You don't have permission to use that command.", ephemeral=True)
+        except Exception:
+            pass
+        return
+    logging.error(f"Slash command failed: {error}", exc_info=True)
+
 # ==========================================
 # SANIN KNOWLEDGE & SYSTEM PROMPT
 # ==========================================
@@ -318,6 +334,84 @@ def is_owner(user) -> bool:
         return user.id == owner.id
     members = getattr(owner, "members", None)
     return bool(members and any(user.id == member.id for member in members))
+
+MENTION_ID_RE = re.compile(r"<@!?(\d+)>")
+
+def normalize_member_name(value: str) -> str:
+    return value.strip().lstrip("@").rstrip(".").lower()
+
+async def resolve_member(guild, value):
+    if isinstance(value, discord.Member):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    match = MENTION_ID_RE.search(text)
+    if match:
+        member_id = int(match.group(1))
+        member = guild.get_member(member_id)
+        if member:
+            return member
+        try:
+            return await guild.fetch_member(member_id)
+        except Exception:
+            return None
+    if text.isdigit():
+        member = guild.get_member(int(text))
+        if member:
+            return member
+        try:
+            return await guild.fetch_member(int(text))
+        except Exception:
+            return None
+    target = normalize_member_name(text)
+    if not target:
+        return None
+    member = guild.get_member_named(text)
+    if member:
+        return member
+    matches = []
+    for entry in guild.members:
+        names = {normalize_member_name(entry.name), normalize_member_name(entry.display_name)}
+        if entry.nick:
+            names.add(normalize_member_name(entry.nick))
+        if target in names:
+            return entry
+        if any(name.startswith(target) for name in names):
+            matches.append(entry)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+async def resolve_user(guild, value):
+    if isinstance(value, discord.User):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    match = MENTION_ID_RE.search(text)
+    user_id = int(match.group(1)) if match else (int(text) if text.isdigit() else None)
+    if user_id is not None:
+        member = guild.get_member(user_id)
+        if member:
+            return member
+        try:
+            return await guild.fetch_user(user_id)
+        except Exception:
+            return None
+    member = await resolve_member(guild, text)
+    if member:
+        return member
+    target = normalize_member_name(text)
+    try:
+        async for entry in guild.bans(limit=1000):
+            user = entry.user
+            names = {normalize_member_name(user.name), normalize_member_name(getattr(user, "display_name", user.name))}
+            if target in names:
+                return user
+    except Exception as e:
+        logging.warning(f"Ban lookup failed: {e}")
+    return None
 
 def github_headers() -> dict:
     return {
@@ -2494,10 +2588,14 @@ async def tone_slash(interaction: discord.Interaction, description: str, user: d
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to ban", reason="Reason for the ban", delete_days="Days of recent messages to delete", channel="Where to post the public notice")
-async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: str, delete_days: app_commands.Range[int, 0, 7] = 0, channel: discord.TextChannel | None = None):
+async def ban_slash(interaction: discord.Interaction, member: str, reason: str, delete_days: app_commands.Range[int, 0, 7] = 0, channel: discord.TextChannel | None = None):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    member = await resolve_member(interaction.guild, member)
+    if member is None:
+        await interaction.followup.send("Member not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
@@ -2525,10 +2623,14 @@ async def ban_slash(interaction: discord.Interaction, member: discord.Member, re
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="User to unban", reason="Reason for the unban", channel="Where to post the public notice")
-async def unban_slash(interaction: discord.Interaction, user: discord.User, reason: str, channel: discord.TextChannel | None = None):
+async def unban_slash(interaction: discord.Interaction, user: str, reason: str, channel: discord.TextChannel | None = None):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    user = await resolve_user(interaction.guild, user)
+    if user is None:
+        await interaction.followup.send("User not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
@@ -2560,10 +2662,14 @@ async def unban_slash(interaction: discord.Interaction, user: discord.User, reas
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to kick", reason="Reason for the kick", channel="Where to post the public notice")
-async def kick_slash(interaction: discord.Interaction, member: discord.Member, reason: str, channel: discord.TextChannel | None = None):
+async def kick_slash(interaction: discord.Interaction, member: str, reason: str, channel: discord.TextChannel | None = None):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    member = await resolve_member(interaction.guild, member)
+    if member is None:
+        await interaction.followup.send("Member not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
@@ -2591,10 +2697,14 @@ async def kick_slash(interaction: discord.Interaction, member: discord.Member, r
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to softban", reason="Reason for the softban", delete_days="Days of recent messages to delete", channel="Where to post the public notice")
-async def softban_slash(interaction: discord.Interaction, member: discord.Member, reason: str, delete_days: app_commands.Range[int, 0, 7] = 1, channel: discord.TextChannel | None = None):
+async def softban_slash(interaction: discord.Interaction, member: str, reason: str, delete_days: app_commands.Range[int, 0, 7] = 1, channel: discord.TextChannel | None = None):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    member = await resolve_member(interaction.guild, member)
+    if member is None:
+        await interaction.followup.send("Member not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
@@ -2629,10 +2739,14 @@ async def softban_slash(interaction: discord.Interaction, member: discord.Member
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to timeout", reason="Reason for the timeout", duration="Duration such as 10m, 2h, 7d, or 1h30m", channel="Where to post the public notice")
-async def timeout_slash(interaction: discord.Interaction, member: discord.Member, reason: str, duration: str = "10m", channel: discord.TextChannel | None = None):
+async def timeout_slash(interaction: discord.Interaction, member: str, reason: str, duration: str = "10m", channel: discord.TextChannel | None = None):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    member = await resolve_member(interaction.guild, member)
+    if member is None:
+        await interaction.followup.send("Member not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
@@ -2666,10 +2780,14 @@ async def timeout_slash(interaction: discord.Interaction, member: discord.Member
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to restore", reason="Reason for removing the timeout", channel="Where to post the public notice")
-async def untimeout_slash(interaction: discord.Interaction, member: discord.Member, reason: str, channel: discord.TextChannel | None = None):
+async def untimeout_slash(interaction: discord.Interaction, member: str, reason: str, channel: discord.TextChannel | None = None):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    member = await resolve_member(interaction.guild, member)
+    if member is None:
+        await interaction.followup.send("Member not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
@@ -2696,10 +2814,14 @@ async def untimeout_slash(interaction: discord.Interaction, member: discord.Memb
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to warn", reason="Reason for the warning", channel="Where to post the public notice")
-async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str, channel: discord.TextChannel | None = None):
+async def warn_slash(interaction: discord.Interaction, member: str, reason: str, channel: discord.TextChannel | None = None):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    member = await resolve_member(interaction.guild, member)
+    if member is None:
+        await interaction.followup.send("Member not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
@@ -2717,10 +2839,14 @@ async def warn_slash(interaction: discord.Interaction, member: discord.Member, r
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="User to check")
-async def warnings_slash(interaction: discord.Interaction, user: discord.User):
+async def warnings_slash(interaction: discord.Interaction, user: str):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    user = await resolve_user(interaction.guild, user)
+    if user is None:
+        await interaction.followup.send("User not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     warnings = get_warnings(interaction.guild.id, user.id)
     if not warnings:
         await interaction.followup.send(f"{user.mention} has no warnings.", ephemeral=True)
@@ -2734,10 +2860,14 @@ async def warnings_slash(interaction: discord.Interaction, user: discord.User):
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="User whose warnings should be cleared", reason="Reason for clearing them")
-async def clearwarns_slash(interaction: discord.Interaction, user: discord.User, reason: str):
+async def clearwarns_slash(interaction: discord.Interaction, user: str, reason: str):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    user = await resolve_user(interaction.guild, user)
+    if user is None:
+        await interaction.followup.send("User not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
@@ -2753,10 +2883,14 @@ async def clearwarns_slash(interaction: discord.Interaction, user: discord.User,
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="User to note", note="What should be recorded")
-async def note_slash(interaction: discord.Interaction, user: discord.User, note: str):
+async def note_slash(interaction: discord.Interaction, user: str, note: str):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    user = await resolve_user(interaction.guild, user)
+    if user is None:
+        await interaction.followup.send("User not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     note = note.strip()
     if not note:
         await interaction.followup.send("Give me a note.", ephemeral=True)
@@ -2801,10 +2935,14 @@ async def modlog_slash(interaction: discord.Interaction, user: discord.User | No
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to update", role="Role to add or remove", action="Add or remove the role", reason="Reason for the change", channel="Where to post the public notice")
 @app_commands.choices(action=[app_commands.Choice(name="Add", value="add"), app_commands.Choice(name="Remove", value="remove")])
-async def role_slash(interaction: discord.Interaction, member: discord.Member, role: discord.Role, action: app_commands.Choice[str], reason: str, channel: discord.TextChannel | None = None):
+async def role_slash(interaction: discord.Interaction, member: str, role: discord.Role, action: app_commands.Choice[str], reason: str, channel: discord.TextChannel | None = None):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    member = await resolve_member(interaction.guild, member)
+    if member is None:
+        await interaction.followup.send("Member not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
@@ -2840,10 +2978,14 @@ async def role_slash(interaction: discord.Interaction, member: discord.Member, r
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to update", reason="Reason for the change", nickname="New nickname; leave blank to reset", channel="Where to post the public notice")
-async def nickname_slash(interaction: discord.Interaction, member: discord.Member, reason: str, nickname: str | None = None, channel: discord.TextChannel | None = None):
+async def nickname_slash(interaction: discord.Interaction, member: str, reason: str, nickname: str | None = None, channel: discord.TextChannel | None = None):
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    member = await resolve_member(interaction.guild, member)
+    if member is None:
+        await interaction.followup.send("Member not found. Use @mention, their username, or their user ID.", ephemeral=True)
+        return
     reason = reason.strip()
     if not reason:
         await interaction.followup.send("Give a reason.", ephemeral=True)
