@@ -144,6 +144,7 @@ Accuracy
 - If asked where or how to watch a title, give steps inside Sanin. Never recommend Netflix, Hulu, Crunchyroll, Prime Video, JustWatch, or any other app/site unless the user explicitly asks for non-Sanin options.
 - If a plot detail, form, chapter, or ability is not confirmed by verified data, say it is unconfirmed or not in the manga/anime yet. Never invent new forms or events.
 - Never fabricate a link or present a guessed release date as fact.
+- Never invent Stremio manifest URLs, repo URLs, or add-on names. Only paste URLs present in the verified data. If the lookup returned none, say it found none.
 """
 
 APP_INFO = {
@@ -989,6 +990,16 @@ def repo_mode(prompt: str) -> str:
         return "movie"
     return "cloudstream"
 
+STREMIO_LANGUAGE_SEARCH = {"spanish": "español", "es": "español"}
+STREMIO_LANGUAGE_ALIASES = {
+    "spanish": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
+    "es": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
+    "french": ("french", "français", "francais"),
+    "german": ("german", "deutsch"),
+    "italian": ("italian", "italiano"),
+    "portuguese": ("portuguese", "português", "portugues", "brasil", "brazilian"),
+}
+
 def language_hint(prompt: str) -> str:
     lower = prompt.lower()
     for hint in LANGUAGE_HINTS:
@@ -1041,10 +1052,10 @@ def stremio_query(prompt: str) -> str:
     else:
         lang = language_hint(prompt)
         if lang:
-            params.append("search=" + quote(lang))
+            params.append("search=" + quote(STREMIO_LANGUAGE_SEARCH.get(lang, lang)))
         else:
-            stop = {"stremio", "addon", "addons", "add-on", "repo", "repos", "repository", "plugin", "plugins", "extension", "extensions", "movie", "movies", "tv", "show", "shows", "series", "content", "default", "limited", "torrent", "torrents", "give", "give me", "want", "need", "recommend", "suggest", "best", "good", "working", "which", "find", "please", "for", "the", "a", "an", "and", "me", "no", "without"}
-            words = [word for word in re.findall(r"[a-z0-9]{2,}", lower) if word not in stop]
+            stop = {"stremio", "addon", "addons", "add-on", "add-ons", "repo", "repos", "repository", "plugin", "plugins", "extension", "extensions", "movie", "movies", "tv", "show", "shows", "series", "content", "default", "limited", "torrent", "torrents", "give", "give me", "want", "need", "recommend", "suggest", "best", "good", "working", "which", "find", "please", "for", "the", "a", "an", "and", "me", "no", "without"}
+            words = [word for word in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", lower) if word not in stop]
             if words:
                 params.append("search=" + quote(" ".join(words[:3])))
     params.extend(["sort_by=stars", "order=desc"])
@@ -1066,10 +1077,20 @@ async def stremio_addons(prompt: str) -> tuple[list, bool]:
                 logging.warning("Stremio fallback returned no JSON")
         except Exception as e:
             logging.warning(f"Stremio addon search failed: {e}")
+    if isinstance(data, dict) and "addons" not in data:
+        wrapped = data.get("data") if isinstance(data.get("data"), dict) else {}
+        content = wrapped.get("content")
+        if isinstance(content, str):
+            try:
+                data = json.loads(content)
+            except Exception:
+                pass
     if not isinstance(data, dict):
         return [], False
     addons = []
     skip_torrents = no_torrents_requested(prompt)
+    lang = language_hint(prompt)
+    lang_aliases = STREMIO_LANGUAGE_ALIASES.get(lang, (lang,)) if lang else ()
     for item in data.get("addons", []):
         if not isinstance(item, dict):
             continue
@@ -1086,6 +1107,9 @@ async def stremio_addons(prompt: str) -> tuple[list, bool]:
         if not has_stream:
             continue
         description = str(manifest.get("description") or "")
+        haystack = f"{name} {description}".lower()
+        if lang_aliases and not any(alias in haystack for alias in lang_aliases):
+            continue
         if skip_torrents and looks_like_torrent(name, description, manifest_url, item.get("slug", "")):
             continue
         addons.append({
