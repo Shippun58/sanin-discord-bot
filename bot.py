@@ -35,6 +35,16 @@ MEMORY_REPO = os.getenv("MEMORY_REPO", "Shippun58/sanin-discord-bot")
 MEMORY_BRANCH = os.getenv("MEMORY_BRANCH", "memory")
 LOCAL_MEMORY_FILE = Path(__file__).with_name("memory.json")
 DEV_ID = os.getenv("DEV_ID", os.getenv("OWNER_ID", "1464266754980315324"))
+OWNER_IDS = {
+    value.strip()
+    for value in (
+        os.getenv("OWNER_IDS", ""),
+        os.getenv("OWNER_ID", ""),
+        str(DEV_ID),
+        "1527953814139834368",
+    )
+    if value and value.strip()
+}
 MANUAL_PATH = Path(__file__).with_name("sanin_manual.md")
 WEB_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; SaninBot/1.0; +https://sanin-discord-bot.onrender.com/healthz)",
@@ -215,8 +225,7 @@ SECURITY_PROBE_PATTERNS = (
 def is_owner_id(user_id) -> bool:
     if user_id is None:
         return False
-    owner_id = os.getenv("OWNER_ID", "").strip()
-    return str(user_id) == (owner_id or str(DEV_ID))
+    return str(user_id) in OWNER_IDS
 
 def is_security_probe(prompt: str) -> bool:
     lower = prompt.lower()
@@ -349,9 +358,10 @@ def add_to_history(channel_id: int, role: str, content: str):
 memory_cache = {"data": None, "checked_at": 0.0}
 
 def is_owner(user) -> bool:
-    owner_id = os.getenv("OWNER_ID", "").strip()
-    if owner_id:
-        return str(user.id) == owner_id
+    if user is None:
+        return False
+    if str(getattr(user, "id", "")) in OWNER_IDS:
+        return True
     owner = getattr(bot.application, "owner", None)
     if owner is None:
         return False
