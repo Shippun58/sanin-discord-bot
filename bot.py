@@ -1370,6 +1370,9 @@ def asks_extension_repo(prompt: str) -> bool:
         return False
     if any(k in lower for k in ("how to add", "how do i add", "how can i add")):
         return False
+    if "sanin" in lower and any(k in lower for k in ("can we", "can i", "can you", "does", "is it", "are they", "now use", "work in")):
+        if any(k in lower for k in ("use", "work", "available", "supported", "installed")) and not any(k in lower for k in ("which", "recommend", "suggest", "find", "get", "best", "need")):
+            return False
     if any(k in lower for k in ("not working", "broken", "error", "won't", "doesn't", "isn't", "crash")) and not REPO_URL_RE.search(prompt):
         return False
     if any(k in lower for k in ("repo", "repository")):
