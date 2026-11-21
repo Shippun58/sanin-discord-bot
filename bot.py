@@ -1500,8 +1500,9 @@ def repo_mode(prompt: str) -> str:
         return "stremio"
     if any(k in lower for k in ("live", "sports", "sport", "match", "iptv", "channel")):
         return "movie"
-    plugin_not_addon = bool(re.search(r"\bplugins?\b.{0,40}\bnot\b.{0,20}\badd-?ons?\b", lower))
-    if ("addon" in lower or "add-on" in lower) and not plugin_not_addon:
+    plugin_present = bool(re.search(r"\bplugins?\b", lower))
+    addon_present = "addon" in lower or "add-on" in lower
+    if addon_present and not plugin_present:
         return "stremio"
     if "aniyomi" in lower or "anime" in lower:
         return "aniyomi"
