@@ -396,8 +396,14 @@ async def resolve_user(guild, value):
         if member:
             return member
         try:
-            return await guild.fetch_user(user_id)
-        except Exception:
+            return await bot.fetch_user(user_id)
+        except Exception as e:
+            logging.warning(f"fetch_user failed for {user_id}: {e}")
+        try:
+            entry = await guild.fetch_ban(discord.Object(id=user_id))
+            return entry.user
+        except Exception as e:
+            logging.warning(f"fetch_ban fallback failed for {user_id}: {e}")
             return None
     member = await resolve_member(guild, text)
     if member:
