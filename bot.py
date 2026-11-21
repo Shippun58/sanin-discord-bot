@@ -156,6 +156,7 @@ Accuracy
 - Talk about rumors as rumors: what is known, what is reported, and what is still speculation. Never brush off a question just because it is not about Sanin.
 - Answer directly. If a current number is not in the data, give your best knowledge-based answer and flag it as possibly outdated instead of telling the user where to look.
 - Treat short follow-ups and replies as continuations of the conversation. When someone asks "what about X" or replies to your last message, stay on the same topic and resolve X against the previous exchange instead of answering the words literally.
+- Before answering, analyze the text and recent context. Phrases like "is it good", "worth it", "how was it", or complaints are not titles; resolve them to the last discussed work. Only treat a plausible title-like phrase as a new media lookup.
 - Never name a specific extension, plugin, or add-on unless it appears in verified data, the manual, or a manifest that was actually checked. If it is missing or removed, say that plainly and tell them to test the repo themselves.
 - If asked where or how to watch a title, give steps inside Sanin. Never recommend Netflix, Hulu, Crunchyroll, Prime Video, JustWatch, or any other app/site unless the user explicitly asks for non-Sanin options.
 - If a plot detail, form, chapter, or ability is not confirmed by verified data, say it is unconfirmed or not in the manga/anime yet. Never invent new forms or events.
@@ -1120,7 +1121,13 @@ def is_media_lookup_prompt(prompt: str) -> bool:
     smalltalk = r"^(hi|hello|hey|yo|thanks|thank you|ok|okay|yes|no|what|why|how|where|who)[!. ]*$"
     if re.fullmatch(smalltalk, lower):
         return False
-    if re.match(r"^(who|what|why|how|where)\b", lower) and not re.search(r"\b(anime|manga|movie|show|series|tv|release|episode|chapter|score|about|title|form|arc|is)\b", lower):
+    if re.match(r"^what is\b", lower) and not re.search(r"\b(your|you|this|that|it)\b", lower):
+        return True
+    if re.match(r"^(who|what|why|how|where|which|can|could|should|would|will|do|does)\b", lower) and not re.search(r"\b(anime|manga|movie|show|series|tv|release|episode|chapter|score|about|title|form|arc)\b", lower):
+        return False
+    if re.match(r"^is\b", lower) and not re.search(r"\b(anime|manga|movie|tv|series|live action)\b", lower):
+        return False
+    if re.search(r"\b(annoying|stupid|dumb|trash|garbage|silly|mid|bad|good|great|nice|wow|lol|lmao|bro|app|bot)\b", lower):
         return False
     return True
 
@@ -1245,6 +1252,23 @@ def wants_recent_context(prompt: str) -> bool:
         r"\banswer (?:this|that|it)\b",
         r"\bis that (?:good|bad|right|wrong|correct)\b",
         r"^why[?!.]*$",
+    )
+    return any(re.search(pattern, lower) for pattern in patterns)
+
+def is_evaluative_followup(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    if len(prompt.split()) > 6:
+        return False
+    patterns = (
+        r"^(?:is|was|are) (?:it|that|this|he|she|they)\b",
+        r"^is (?:it|that|this) (?:any )?good\b",
+        r"^any good[?!.]*$",
+        r"^worth (?:it|watching|reading|checking)?[?!.]*$",
+        r"^how (?:was|is) it[?!.]*$",
+        r"^what did you think\b",
+        r"^do you (?:like|recommend) it\b",
+        r"^should i (?:watch|read|check) it\b",
+        r"^(?:good|bad|decent|mid|trash|meh)[?!.]*$",
     )
     return any(re.search(pattern, lower) for pattern in patterns)
 
@@ -1816,7 +1840,7 @@ async def gather_context(prompt: str) -> str:
             jobs.append(("wiki", wiki_search(title)))
             if any(k in lower for k in ("repo", "extension", "source")) and not any(k in lower for k in ("source code", "github repo")):
                 jobs.append(("wotaku", wotaku_repos(lower)))
-            if any(k in lower for k in ("anime", "manga", "show", "movie", "series", "release", "air", "episode", "episodes", "chapter", "chapters", "how many", "score", "compare", "better", "season", "when", "rumor", "rumour", "leak", "form", "next", "long")):
+            if any(k in lower for k in ("anime", "manga", "show", "movie", "series", "release", "air", "episode", "episodes", "chapter", "chapters", "how many", "score", "compare", "better", "season", "when", "rumor", "rumour", "leak", "form", "next", "long", "good", "worth", "recommend")):
                 jobs.append(("anilist_anime", anilist_search(title, "ANIME")))
                 jobs.append(("anilist_manga", anilist_search(title, "MANGA")))
                 if TMDB_API_KEY:
@@ -1873,6 +1897,8 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     global groq_key_index
 
     session_key = f"{channel_id}:{user_id or user_name}"
+    original_prompt = user_prompt
+    skip_media_lookup = is_evaluative_followup(original_prompt)
     memory = await load_memory()
     hydrate_session(session_key, memory)
     retry_re = re.compile(r"(?:retry|try again|again|recheck|check again|try it again)[!. ]*", re.I)
@@ -1881,7 +1907,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
             if entry.get("role") == "user" and not retry_re.fullmatch(str(entry.get("content", "")).strip()):
                 user_prompt = str(entry["content"])
                 break
-    elif is_plugin_followup(user_prompt) or is_watch_followup(user_prompt):
+    elif is_plugin_followup(user_prompt) or is_watch_followup(user_prompt) or is_evaluative_followup(user_prompt):
         for entry in reversed(conversation_history[session_key]):
             previous = str(entry.get("content", "")).strip() if entry.get("role") == "user" else ""
             if previous and previous.lower() != user_prompt.lower() and not retry_re.fullmatch(previous):
@@ -1905,7 +1931,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
             await record_exchange(session_key, user_prompt, repo_answer)
             return repo_answer
 
-    media_answer = await media_disambiguation(user_prompt)
+    media_answer = None if skip_media_lookup else await media_disambiguation(user_prompt)
     if media_answer:
         await record_exchange(session_key, user_prompt, media_answer)
         return media_answer
