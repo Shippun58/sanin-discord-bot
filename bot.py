@@ -680,17 +680,19 @@ async def web_search(query: str) -> list:
         "Referer": "https://lite.duckduckgo.com/",
     }
     errors = []
+    sources = (
+        ("POST", "https://lite.duckduckgo.com/lite/", {"data": {"q": query, "kl": "us-en"}}, parse_ddg_results),
+        ("GET", "https://search.brave.com/search", {"params": {"q": query}}, parse_brave_results),
+    )
     async with aiohttp.ClientSession() as session:
-        for url, parser in (
-            ("https://lite.duckduckgo.com/lite/", parse_ddg_results),
-            ("https://search.brave.com/search", parse_brave_results),
-        ):
+        for method, url, kwargs, parser in sources:
             try:
-                async with session.get(
+                async with session.request(
+                    method,
                     url,
-                    params={"q": query},
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=12),
+                    **kwargs,
                 ) as resp:
                     if resp.status != 200:
                         errors.append(f"HTTP {resp.status}")
@@ -796,7 +798,11 @@ async def test_repo(url: str) -> str:
     if not result["ok"]:
         return f"Repo check failed: {result['error']}."
     suffix = f" Sample: {result['sample']}" if result.get("sample") else ""
-    return f"Repo OK: {result['count']} entries, {result['valid_urls']} with valid plugin URLs.{suffix}"
+    if result.get("valid_urls"):
+        detail = f"{result['count']} entries, {result['valid_urls']} with valid plugin URLs."
+    else:
+        detail = f"{result['count']} entries verified."
+    return f"Repo OK: {detail}{suffix}"
 
 def extract_repo_urls(text: str) -> list:
     text = unescape(text or "")
@@ -807,6 +813,9 @@ def extract_repo_urls(text: str) -> list:
         if "github.com/" in url and "/blob/" in url:
             url = url.replace("github.com/", "raw.githubusercontent.com/").replace("/blob/", "/")
         if not url.endswith(".json") or url.lower().endswith(("package.json", "package-lock.json")):
+            continue
+        parsed = urlparse(url)
+        if parsed.hostname == "intradeus.github.io" or "protocol-redirector" in parsed.path or "r=aniyomi://" in url or "r=anikku://" in url:
             continue
         if url not in urls:
             urls.append(url)
@@ -1343,7 +1352,7 @@ async def query_gemini(api_key: str, messages: list) -> str:
             logging.warning(f"Gemini {m} failed: {e}")
     raise Exception("All Gemini models failed")
 
-async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, context: str | None = None, user_id: int | None = None, status=None) -> str:
+async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, context: str | None = None, user_id: int | None = None, status=None, prior: str | None = None) -> str:
     global groq_key_index
 
     session_key = f"{channel_id}:{user_id or user_name}"
@@ -1383,7 +1392,10 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     formatted_messages = [{"role": "system", "content": system_prompt}]
     for msg in conversation_history[session_key]:
         formatted_messages.append(msg)
-    formatted_messages.append({"role": "user", "content": f"{user_name}: {user_prompt}"})
+    user_content = f"{user_name}: {user_prompt}"
+    if prior:
+        user_content = f"Previous message from San: {prior}\n{user_content}"
+    formatted_messages.append({"role": "user", "content": user_content})
 
     async def finish(reply: str) -> str:
         if re.search(r"\bCANNOT_HELP\b", reply, re.I):
@@ -1985,7 +1997,7 @@ async def on_message(message: discord.Message):
         if not clean:
             clean = "Hello!"
         if reply_context:
-            clean = f"Previous message: '{reply_context}'. Follow-up: {clean}"
+            debug_chat("ctx", message.channel.id, message.author.display_name, reply_context)
         debug_chat("in", message.channel.id, message.author.display_name, clean)
         fact = extract_user_fact(message.clean_content)
         if fact:
@@ -1998,7 +2010,7 @@ async def on_message(message: discord.Message):
             await message.channel.send(random.choice(WAIT_LINES))
 
         async with message.channel.typing():
-            reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean, user_id=message.author.id, status=status)
+            reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean, user_id=message.author.id, status=status, prior=reply_context or None)
             debug_chat("out", message.channel.id, bot.user.display_name if bot.user else "San", reply_text)
             chunks = split_message(reply_text)
             if chunks:
