@@ -948,11 +948,35 @@ def repo_relevance_score(item: dict, prompt: str) -> int:
     haystack = f"{item.get('title', '')} {item.get('snippet', '')}".lower()
     return sum(1 for word in words if word in haystack)
 
+TORRENT_TERMS = ("torrent", "pirate", "nyaa", "zooqle", "1337x", "rarbg", "torra", "debrid")
+
+def no_torrents_requested(prompt: str) -> bool:
+    lower = prompt.lower()
+    return bool(re.search(r"\b(no|without|avoid|exclude|don'?t|do not|not)\b[^.!?\n]{0,25}\btorrents?\b", lower))
+
+def looks_like_torrent(*values: str) -> bool:
+    text = " ".join(str(value) for value in values).lower()
+    if "notorrent" in text.replace("-", "").replace(" ", ""):
+        return False
+    if any(term in text for term in TORRENT_TERMS):
+        return True
+    return bool(re.search(r"(?<![a-z0-9])yts(?![a-z0-9])", text))
+
+def is_bare_repo_request(prompt: str) -> bool:
+    lower = prompt.lower()
+    if not re.search(r"\b(repos?|repositories?|repository)\b", lower):
+        return False
+    if REPO_URL_RE.search(prompt):
+        return False
+    if any(k in lower for k in ("anime", "aniyomi", "movie", "movies", "tv", "show", "shows", "series", "cloudstream", "stremio", "addon", "add-on", "plugin", "plugins", "extension", "extensions", "nsfw", "adult", "hentai")):
+        return False
+    filler = {"repo", "repos", "repository", "repositories", "a", "an", "the", "any", "some", "good", "best", "working", "for", "me", "please", "give", "find", "recommend", "suggest", "which", "is", "are", "you", "your", "can", "could", "would", "i", "my", "need", "want", "link", "url"}
+    words = {word for word in re.findall(r"[a-z0-9]{2,}", lower) if word not in filler}
+    return not words
+
 def repo_mode(prompt: str) -> str:
     lower = prompt.lower()
-    if "stremio" in lower:
-        return "stremio"
-    if any(k in lower for k in ("addon", "add-on")) and "aniyomi" not in lower:
+    if "stremio" in lower or "addon" in lower or "add-on" in lower:
         return "stremio"
     if "aniyomi" in lower or "anime" in lower:
         return "aniyomi"
@@ -1002,7 +1026,7 @@ def best_plugin_score(check: dict, prompt: str) -> int:
 
 def stremio_query(prompt: str) -> str:
     lower = prompt.lower()
-    params = ["limit=5"]
+    params = ["limit=50"]
     if any(k in lower for k in ("nsfw", "adult", "hentai", "porn", "xxx", "18+")):
         params.append("nsfw=only")
     elif "rating" in lower or "imdb" in lower:
@@ -1014,14 +1038,14 @@ def stremio_query(prompt: str) -> str:
         if lang:
             params.append("search=" + quote(lang))
         else:
-            stop = {"stremio", "addon", "addons", "add-on", "repo", "repository", "movie", "movies", "tv", "show", "shows", "series", "content", "give", "give me", "want", "need", "recommend", "suggest", "best", "good", "working", "which", "find", "please", "for", "the", "a", "an", "and", "me"}
+            stop = {"stremio", "addon", "addons", "add-on", "repo", "repos", "repository", "plugin", "plugins", "extension", "extensions", "movie", "movies", "tv", "show", "shows", "series", "content", "default", "limited", "torrent", "torrents", "give", "give me", "want", "need", "recommend", "suggest", "best", "good", "working", "which", "find", "please", "for", "the", "a", "an", "and", "me", "no", "without"}
             words = [word for word in re.findall(r"[a-z0-9]{2,}", lower) if word not in stop]
             if words:
                 params.append("search=" + quote(" ".join(words[:3])))
     params.extend(["sort_by=stars", "order=desc"])
     return "https://stremio-addons.net/api/v0/addons?" + "&".join(params)
 
-async def stremio_addons(prompt: str) -> list:
+async def stremio_addons(prompt: str) -> tuple[list, bool]:
     url = stremio_query(prompt)
     data = None
     try:
@@ -1035,9 +1059,10 @@ async def stremio_addons(prompt: str) -> list:
         except Exception as e:
             logging.warning(f"Stremio addon search failed: {e}")
     if not isinstance(data, dict):
-        return []
+        return [], False
     addons = []
-    for item in data.get("addons", [])[:3]:
+    skip_torrents = no_torrents_requested(prompt)
+    for item in data.get("addons", []):
         if not isinstance(item, dict):
             continue
         manifest = item.get("manifest") if isinstance(item.get("manifest"), dict) else {}
@@ -1045,14 +1070,26 @@ async def stremio_addons(prompt: str) -> list:
         manifest_url = item.get("manifestUrl")
         if not name or not manifest_url:
             continue
+        resources = manifest.get("resources") or []
+        has_stream = any(
+            resource == "stream" or (isinstance(resource, dict) and resource.get("name") == "stream")
+            for resource in resources
+        )
+        if not has_stream:
+            continue
+        description = str(manifest.get("description") or "")
+        if skip_torrents and looks_like_torrent(name, description, manifest_url, item.get("slug", "")):
+            continue
         addons.append({
             "name": str(name)[:60],
             "url": manifest_url,
             "nsfw": bool(item.get("nsfw") or manifest.get("mature")),
             "stars": item.get("stars"),
-            "description": str(manifest.get("description") or "")[:120],
+            "description": description[:120],
         })
-    return addons
+        if len(addons) >= 3:
+            break
+    return addons, True
 
 def format_stremio_addons(addons: list) -> str:
     if not addons:
@@ -1110,6 +1147,8 @@ def plugin_name_matches(name: str, want: str) -> bool:
 
 def pick_plugin_names(plugins: list, prompt: str, preferred: list | None = None) -> list:
     records = [plugin if isinstance(plugin, dict) else {"name": str(plugin)} for plugin in plugins]
+    if no_torrents_requested(prompt):
+        records = [record for record in records if not looks_like_torrent(plugin_text(record))]
     if preferred:
         chosen = []
         for want in preferred:
@@ -1183,7 +1222,8 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
         elif any(k in prompt.lower() for k in ("plugin", "plugins", "extension", "extensions", "addon", "add-on")):
             lines.append("I checked that manifest and couldn't find a matching plugin; test it manually before relying on it.")
         if len(verified) > 1:
-            lines.append("Also verified: " + ", ".join(check["url"] for check in verified[1:2]))
+            also = verified[1:3] if mode == "aniyomi" else verified[1:2]
+            lines.append("Also verified: " + ", ".join(check["url"] for check in also))
     else:
         lines.append("I couldn't verify a working repo from those results; test any repo manually before relying on it.")
     if unverified:
@@ -1196,16 +1236,26 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
     direct = REPO_URL_RE.search(prompt)
     if direct:
         return await test_repo(direct.group(0))
+    if is_bare_repo_request(prompt):
+        return "Which kind of repo do you need: anime or Movie & TV?"
 
     lower = prompt.lower()
     mode = repo_mode(prompt)
+    if mode == "stremio":
+        addons, loaded = await stremio_addons(prompt)
+        if addons:
+            return format_stremio_addons(addons)
+        if loaded:
+            if no_torrents_requested(prompt):
+                return "I checked stremio-addons.net but didn't find a matching non-torrent add-on."
+            return "I checked stremio-addons.net but didn't find a matching add-on."
+        return "I couldn't load stremio-addons.net to verify an add-on; check that site manually."
+
     lang = language_hint(prompt)
     preferred = memory_repo_preferences(prompt, facts)
     queries = [prompt]
     if mode == "aniyomi":
         queries.append(prompt + " aniyomi repo")
-    elif mode in ("stremio", "movie"):
-        queries.append(prompt + " stremio addon")
     elif "cloudstream" not in lower:
         queries.append(prompt + " cloudstream")
     if lang:
@@ -1222,10 +1272,8 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
 
     if mode == "aniyomi":
         candidates = [YUZONO_ANIME_REPO]
-    elif mode in ("cloudstream", "movie"):
-        candidates = [PHISHER_REPO, CNC_REPO]
     else:
-        candidates = []
+        candidates = [PHISHER_REPO, CNC_REPO]
     pages = []
     def add_urls(text: str):
         for url in extract_repo_urls(text):
@@ -1262,6 +1310,10 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
         if isinstance(text, str) and text:
             add_urls(text)
 
+    if mode == "aniyomi":
+        candidates = [url for url in candidates if not any(k in url.lower() for k in ("cloudstream", "cloud-stream", "stremio"))]
+    else:
+        candidates = [url for url in candidates if url in (PHISHER_REPO, CNC_REPO) or any(k in url.lower() for k in ("cloudstream", "cloud-stream", "cs3"))]
     if lang:
         candidates.sort(key=lambda url: 0 if re.search(rf"(?<![a-z]){re.escape(lang)}(?![a-z])", url.lower()) else 1)
     candidates = candidates[:6]
@@ -1272,12 +1324,6 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
         repo_text = format_repo_checks(clean_checks, prompt, preferred)
         if repo_text:
             parts.append(repo_text)
-    if mode in ("stremio", "movie"):
-        addons = await stremio_addons(prompt)
-        if addons:
-            parts.append(format_stremio_addons(addons))
-        else:
-            parts.append("I couldn't load stremio-addons.net to verify an add-on; check that site manually.")
     return "\n\n".join(parts) or None
 
 async def gather_context(prompt: str) -> str:
