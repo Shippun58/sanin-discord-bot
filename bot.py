@@ -21,6 +21,10 @@ from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+def debug_chat(direction: str, channel_id, user, text: str) -> None:
+    clean = " ".join(str(text).split())[:1500]
+    logging.info(f"[DEBUG_CHAT] {direction} channel={channel_id} user={user} text={clean}")
+
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_KEYS_STR = os.getenv("GROQ_API_KEYS", "")
@@ -1982,6 +1986,7 @@ async def on_message(message: discord.Message):
             clean = "Hello!"
         if reply_context:
             clean = f"Previous message: '{reply_context}'. Follow-up: {clean}"
+        debug_chat("in", message.channel.id, message.author.display_name, clean)
         fact = extract_user_fact(message.clean_content)
         if fact:
             await remember_user(message.author, fact)
@@ -1994,6 +1999,7 @@ async def on_message(message: discord.Message):
 
         async with message.channel.typing():
             reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean, user_id=message.author.id, status=status)
+            debug_chat("out", message.channel.id, bot.user.display_name if bot.user else "San", reply_text)
             chunks = split_message(reply_text)
             if chunks:
                 await message.channel.send(chunks[0])
@@ -2146,6 +2152,7 @@ async def tone_prefix_cmd(ctx, *, description: str):
 @app_commands.describe(question="Your question for San")
 async def ask_slash(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
+    debug_chat("in", interaction.channel_id, interaction.user.display_name, question)
     fact = extract_user_fact(question)
     if fact:
         await remember_user(interaction.user, fact)
@@ -2157,6 +2164,7 @@ async def ask_slash(interaction: discord.Interaction, question: str):
         await interaction.followup.send(random.choice(WAIT_LINES))
 
     reply = await get_ai_response(interaction.channel_id, interaction.user.display_name, question, user_id=interaction.user.id, status=status)
+    debug_chat("out", interaction.channel_id, bot.user.display_name if bot.user else "San", reply)
     chunks = split_message(reply)
     if chunks:
         await interaction.followup.send(chunks[0])
