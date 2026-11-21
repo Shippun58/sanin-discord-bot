@@ -1131,6 +1131,13 @@ def is_watch_followup(prompt: str) -> bool:
     )
     return any(re.search(pattern, lower) for pattern in patterns)
 
+def is_language_followup(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    if len(prompt.split()) > 4:
+        return False
+    language_words = "|".join(re.escape(word) for word in sorted(LANGUAGE_HINTS, key=len, reverse=True))
+    return bool(re.fullmatch(rf"(?:and|what about|how about)?\s*(?:{language_words})\s*[?.!]*", lower))
+
 def is_media_lookup_prompt(prompt: str) -> bool:
     lower = prompt.lower().strip()
     if is_watch_request(prompt) or asks_extension_repo(prompt):
@@ -1141,6 +1148,9 @@ def is_media_lookup_prompt(prompt: str) -> bool:
         return False
     smalltalk = r"^(hi|hello|hey|yo|thanks|thank you|ok|okay|yes|no|what|why|how|where|who)[!. ]*$"
     if re.fullmatch(smalltalk, lower):
+        return False
+    language_words = "|".join(re.escape(word) for word in sorted(LANGUAGE_HINTS, key=len, reverse=True))
+    if re.fullmatch(rf"(?:and|what about|how about)?\s*(?:{language_words})\s*[?.!]*", lower):
         return False
     if re.match(r"^(i'm|im|i mean|i asked|i said|my question|what i meant|generic question)\b", lower):
         return False
@@ -1238,7 +1248,8 @@ async def media_disambiguation(prompt: str) -> str | None:
     if not explicit_anime:
         jobs.append(("tv", tmdb_search(title, "tv")))
         jobs.append(("movie", tmdb_search(title, "movie")))
-    jobs.append(("imdb", imdb_search(title)))
+    if re.search(r"\bimdb\b", lower):
+        jobs.append(("imdb", imdb_search(title)))
     results = await asyncio.gather(*(job[1] for job in jobs), return_exceptions=True)
     raw_hits = {}
     for (name, _), result in zip(jobs, results):
@@ -1798,7 +1809,7 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
             names = fallback_plugin_names(first, prompt)
         if names:
             hint = f"for {label}" if label not in ("CloudStream", "Stremio", "content") else ""
-            lines.append(f"Try these{hint}: {', '.join(names)}")
+            lines.append(f"Try these {hint}: {', '.join(names)}" if hint else f"Try these: {', '.join(names)}")
             if preferred:
                 missing = [want for want in preferred if not any(plugin_name_matches(name, want) for name in names)]
                 if missing:
@@ -2006,7 +2017,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
             if entry.get("role") == "user" and not retry_re.fullmatch(str(entry.get("content", "")).strip()):
                 user_prompt = str(entry["content"])
                 break
-    elif is_plugin_followup(user_prompt) or is_watch_followup(user_prompt) or is_evaluative_followup(user_prompt) or is_correction_followup(user_prompt):
+    elif is_plugin_followup(user_prompt) or is_watch_followup(user_prompt) or is_evaluative_followup(user_prompt) or is_correction_followup(user_prompt) or is_language_followup(user_prompt):
         for entry in reversed(conversation_history[session_key]):
             previous = str(entry.get("content", "")).strip() if entry.get("role") == "user" else ""
             if previous and previous.lower() != user_prompt.lower() and not retry_re.fullmatch(previous):
