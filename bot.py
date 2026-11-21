@@ -1298,6 +1298,17 @@ def is_plugin_followup(prompt: str) -> bool:
     )
     return any(re.search(pattern, lower) for pattern in patterns)
 
+def is_correction_followup(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    if len(prompt.split()) > 24:
+        return False
+    patterns = (
+        r"^(but|no|nah|nope|i asked|i said|i meant|that'?s|that is|actually)\b",
+        r"\bnot (?:a |an )?(?:add-?on|stremio|catalog add-?on)\b",
+        r"\bi (?:asked|said|meant)\b",
+    )
+    return any(re.search(pattern, lower) for pattern in patterns)
+
 def asks_extension_repo(prompt: str) -> bool:
     lower = prompt.lower()
     if wants_sanin_links(prompt):
@@ -1312,6 +1323,9 @@ def asks_extension_repo(prompt: str) -> bool:
         return any(k in lower for k in ("test", "check", "valid", "work", "broken"))
     if any(k in lower for k in ("nsfw", "adult", "hentai")) and any(k in lower for k in ("extension", "addon", "add-on", "plugin")):
         return True
+    if any(k in lower for k in ("plugin", "plugins")):
+        if any(k in lower for k in ("find", "recommend", "suggest", "which", "best", "good", "working", "get", "should", "need", "want", "overall")):
+            return True
     if any(k in lower for k in ("addon", "add-on")):
         if any(k in lower for k in ("not working", "broken", "error", "won't", "doesn't", "isn't")):
             return False
@@ -1452,11 +1466,12 @@ def repo_mode(prompt: str) -> str:
         return "stremio"
     if any(k in lower for k in ("live", "sports", "sport", "match", "iptv", "channel")):
         return "movie"
-    if "addon" in lower or "add-on" in lower:
+    plugin_not_addon = bool(re.search(r"\bplugins?\b.{0,40}\bnot\b.{0,20}\badd-?ons?\b", lower))
+    if ("addon" in lower or "add-on" in lower) and not plugin_not_addon:
         return "stremio"
     if "aniyomi" in lower or "anime" in lower:
         return "aniyomi"
-    if any(k in lower for k in ("movie", "movies", "tv", "show", "series")):
+    if any(k in lower for k in ("movie", "movies", "tv", "show", "shows", "series")):
         return "movie"
     return "cloudstream"
 
@@ -1483,6 +1498,7 @@ PLUGIN_INTENTS = {
     "rating": ("imdb", "rating", "score", "metadata", "tmdb"),
     "metadata": ("metadata", "imdb", "tmdb", "trailer"),
     "live": ("live", "sport", "tv", "channel", "iptv", "ppv"),
+    "media": ("movie", "movies", "film", "show", "shows", "series", "tv"),
     "anime": ("anime", "ani"),
     "dub": ("dub", "dubbed"),
     "sub": ("sub", "subtitle"),
@@ -1498,10 +1514,10 @@ def plugin_score(plugin, prompt: str) -> int:
     text = plugin_text(plugin).lower()
     terms = set()
     for key, aliases in PLUGIN_INTENTS.items():
-        if re.search(rf"(?<![a-z]){re.escape(key)}(?![a-z])", lower):
+        if re.search(rf"(?<![a-z]){re.escape(key)}(?![a-z])", lower) or any(re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", lower) for alias in aliases):
             terms.update(aliases)
     for word in re.findall(r"[a-z0-9]{4,}", lower):
-        if word not in {"repo", "repository", "extension", "plugin", "cloudstream", "aniyomi", "stremio", "sanin", "best", "good", "working", "show", "give", "find", "which", "that", "with", "from"}:
+        if word not in {"repo", "repos", "repository", "extension", "plugin", "plugins", "cloudstream", "clouds", "aniyomi", "stremio", "sanin", "best", "good", "working", "show", "shows", "give", "find", "which", "that", "with", "from", "get", "should", "need", "want", "overall", "tons", "phisher", "cnc", "yuzono", "recommend", "suggest", "please", "kind", "kinds", "lot", "lots", "many", "much", "stream", "streaming", "catalog", "addon", "addons"}:
             terms.add(word)
     return sum(1 for term in terms if term in text)
 
@@ -1668,6 +1684,25 @@ def pick_plugin_names(plugins: list, prompt: str, preferred: list | None = None)
             matches.append(name)
     return matches[:4]
 
+def fallback_plugin_names(check: dict, prompt: str, limit: int = 4) -> list:
+    records = check.get("plugins") or check.get("names") or []
+    skip_torrents = no_torrents_requested(prompt)
+    names = []
+    for record in records:
+        if isinstance(record, dict):
+            name = str(record.get("name", ""))
+            text = plugin_text(record)
+        else:
+            name = str(record)
+            text = str(record)
+        if not name or (skip_torrents and looks_like_torrent(text)):
+            continue
+        if name not in names:
+            names.append(name)
+        if len(names) >= limit:
+            break
+    return names
+
 def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = None) -> str | None:
     verified = [check for check in checks if check.get("ok")]
     unverified = [check for check in checks if not check.get("ok")]
@@ -1715,8 +1750,16 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
         if first.get("catalogs"):
             lines.append(f"Catalogs: {first['catalogs']}")
         names = pick_plugin_names(first.get("plugins") or first.get("names", []), prompt, preferred)
+        asks_plugins_from_manifest = bool(re.search(r"\b(?:which|what)\b.{0,25}\bplugins?\b|\bplugins?\b.{0,25}\b(?:should|get|recommend|suggest)\b", prompt_lower))
+        fallback_used = False
+        if not names and asks_plugins_from_manifest and not preferred:
+            names = fallback_plugin_names(first, prompt)
+            if names:
+                lines.append("Plugins in that manifest: " + ", ".join(names))
+                fallback_used = True
         if names:
-            lines.append(("Suggested: " if preferred else "Plugins: ") + ", ".join(names))
+            if not fallback_used:
+                lines.append(("Suggested: " if preferred else "Plugins: ") + ", ".join(names))
             if preferred:
                 missing = [want for want in preferred if not any(plugin_name_matches(name, want) for name in names)]
                 if missing:
@@ -1920,7 +1963,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
             if entry.get("role") == "user" and not retry_re.fullmatch(str(entry.get("content", "")).strip()):
                 user_prompt = str(entry["content"])
                 break
-    elif is_plugin_followup(user_prompt) or is_watch_followup(user_prompt) or is_evaluative_followup(user_prompt):
+    elif is_plugin_followup(user_prompt) or is_watch_followup(user_prompt) or is_evaluative_followup(user_prompt) or is_correction_followup(user_prompt):
         for entry in reversed(conversation_history[session_key]):
             previous = str(entry.get("content", "")).strip() if entry.get("role") == "user" else ""
             if previous and previous.lower() != user_prompt.lower() and not retry_re.fullmatch(previous):
