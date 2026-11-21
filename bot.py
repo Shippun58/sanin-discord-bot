@@ -718,6 +718,8 @@ def clean_reply(text: str) -> str:
         compact = re.sub(r"\s+", "", line)
         if re.fullmatch(r"[-=~*_|>\u2500-\u257f]{4,}", compact):
             continue
+        if re.match(r"^\s*\|.*\|\s*$", line):
+            continue
         lines.append(line.rstrip())
     text = "\n".join(lines)
     text = re.sub(r"\|-{3,}>?", "", text)
@@ -1131,7 +1133,7 @@ def is_media_lookup_prompt(prompt: str) -> bool:
         return False
     if re.match(r"^is\b", lower) and not re.search(r"\b(anime|manga|movie|tv|series|live action)\b", lower):
         return False
-    if re.search(r"\b(annoying|stupid|dumb|trash|garbage|silly|mid|bad|good|great|nice|wow|lol|lmao|bro|app|bot)\b", lower):
+    if re.search(r"\b(annoying|stupid|dumb|trash|garbage|silly|mid|bad|good|great|nice|wow|lol|lmao|bro|app|bot|plugin|plugins|addon|addons|repo|repos|extension|extensions|source|sources|quality|4k)\b", lower):
         return False
     return True
 
@@ -1198,7 +1200,7 @@ def looks_like_media_title(title: str) -> bool:
     lower = title.lower().strip()
     if len(title.split()) > 6 or "?" in title:
         return False
-    if re.search(r"\b(i'm|im|i|you|your|me|my|we|us|asking|question|annoying|good|best|worst|top|recommend|suggest|why|what|how|who|where|which|can|could|should|would|will|do|does|is|are|was|were)\b", lower):
+    if re.search(r"\b(i'm|im|i|you|your|me|my|we|us|asking|question|annoying|good|best|worst|top|recommend|suggest|why|what|how|who|where|which|can|could|should|would|will|do|does|is|are|was|were|plugin|plugins|addon|addons|repo|repos|extension|extensions|source|sources|quality|4k)\b", lower):
         return False
     return len(re.sub(r"[^a-z0-9]+", "", lower)) >= 2
 
@@ -1324,7 +1326,9 @@ def asks_extension_repo(prompt: str) -> bool:
     if any(k in lower for k in ("nsfw", "adult", "hentai")) and any(k in lower for k in ("extension", "addon", "add-on", "plugin")):
         return True
     if any(k in lower for k in ("plugin", "plugins")):
-        if any(k in lower for k in ("find", "recommend", "suggest", "which", "best", "good", "working", "get", "should", "need", "want", "overall")):
+        if any(k in lower for k in ("find", "recommend", "suggest", "which", "best", "good", "working", "get", "should", "need", "want", "overall", "any", "english", "quality", "high", "4k", "sources", "source")):
+            return True
+        if re.search(r"\bplugins?\s*\?\s*$", lower):
             return True
     if any(k in lower for k in ("addon", "add-on")):
         if any(k in lower for k in ("not working", "broken", "error", "won't", "doesn't", "isn't")):
@@ -1750,9 +1754,8 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
         if first.get("catalogs"):
             lines.append(f"Catalogs: {first['catalogs']}")
         names = pick_plugin_names(first.get("plugins") or first.get("names", []), prompt, preferred)
-        asks_plugins_from_manifest = bool(re.search(r"\b(?:which|what)\b.{0,25}\bplugins?\b|\bplugins?\b.{0,25}\b(?:should|get|recommend|suggest)\b", prompt_lower))
         fallback_used = False
-        if not names and asks_plugins_from_manifest and not preferred:
+        if not names and any(k in prompt_lower for k in ("plugin", "plugins")) and not preferred:
             names = fallback_plugin_names(first, prompt)
             if names:
                 lines.append("Plugins in that manifest: " + ", ".join(names))
