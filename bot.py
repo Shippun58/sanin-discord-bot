@@ -49,7 +49,7 @@ REPO_URL_RE = re.compile(r"https?://[^\s<>()]+", re.I)
 PHISHER_REPO = "https://raw.githubusercontent.com/phisher98/cloudstream-extensions-phisher/refs/heads/builds/repo.json"
 CNC_REPO = "https://raw.githubusercontent.com/NivinCNC/CNCVerse-Cloud-Stream-Extension/refs/heads/builds/CNC.json"
 YUZONO_ANIME_REPO = "https://raw.githubusercontent.com/yuzono/anime-repo/repo/index.min.json"
-LANGUAGE_HINTS = ("spanish","español","espanol","es","castellano","french","francais","français","italian","italiano","german","deutsch","japanese","nihongo","portuguese","brazilian","korean","chinese","mandarin","arabic","hindi","urdu","bengali","tamil","telugu","malayalam","indonesian","thai","vietnamese","turkish","russian","polish","dutch","swedish","norwegian","danish","finnish","greek","hebrew","filipino","english")
+LANGUAGE_HINTS = ("spanish","español","espanol","es","castellano","french","francais","français","italian","italiano","german","deutsch","japanese","nihongo","portuguese","brazil","brazilian","korean","chinese","mandarin","arabic","hindi","urdu","bengali","tamil","telugu","malayalam","indonesian","thai","vietnamese","turkish","russian","polish","dutch","swedish","norwegian","danish","finnish","greek","hebrew","filipino","english")
 REPO_LANGUAGE_ALIASES = {
     "spanish": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
     "es": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
@@ -62,7 +62,8 @@ REPO_LANGUAGE_ALIASES = {
     "deutsch": ("german", "deutsch"),
     "japanese": ("japanese", "nihongo", "日本"),
     "portuguese": ("portuguese", "português", "portugues"),
-    "brazilian": ("brazilian", "brasil", "português"),
+    "brazil": ("brazilian", "brazil", "brasil", "português", "portugues", "pt-br"),
+    "brazilian": ("brazilian", "brazil", "brasil", "português", "portugues", "pt-br"),
     "korean": ("korean", "한국"),
     "chinese": ("chinese", "mandarin", "中文"),
     "mandarin": ("mandarin", "chinese", "中文"),
@@ -1502,7 +1503,9 @@ def repo_mode(prompt: str) -> str:
         return "movie"
     plugin_present = bool(re.search(r"\bplugins?\b", lower))
     addon_present = "addon" in lower or "add-on" in lower
-    if addon_present and not plugin_present:
+    if plugin_present and addon_present:
+        return "both"
+    if addon_present:
         return "stremio"
     if "aniyomi" in lower or "anime" in lower:
         return "aniyomi"
@@ -1510,14 +1513,16 @@ def repo_mode(prompt: str) -> str:
         return "movie"
     return "cloudstream"
 
-STREMIO_LANGUAGE_SEARCH = {"spanish": "español", "es": "español"}
+STREMIO_LANGUAGE_SEARCH = {"spanish": "español", "es": "español", "brazil": "brazil", "brazilian": "brazil"}
 STREMIO_LANGUAGE_ALIASES = {
     "spanish": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
     "es": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
     "french": ("french", "français", "francais"),
     "german": ("german", "deutsch"),
     "italian": ("italian", "italiano"),
-    "portuguese": ("portuguese", "português", "portugues", "brasil", "brazilian"),
+    "portuguese": ("portuguese", "português", "portugues", "brasil", "brazil", "brazilian", "pt-br"),
+    "brazil": ("brazilian", "brazil", "brasil", "português", "portugues", "pt-br"),
+    "brazilian": ("brazilian", "brazil", "brasil", "português", "portugues", "pt-br"),
 }
 
 def language_hint(prompt: str) -> str:
@@ -1575,7 +1580,7 @@ def stremio_query(prompt: str) -> str:
         if lang:
             params.append("search=" + quote(STREMIO_LANGUAGE_SEARCH.get(lang, lang)))
         else:
-            stop = {"stremio", "addon", "addons", "add-on", "add-ons", "repo", "repos", "repository", "plugin", "plugins", "extension", "extensions", "movie", "movies", "tv", "show", "shows", "series", "content", "default", "limited", "torrent", "torrents", "give", "give me", "want", "need", "recommend", "suggest", "best", "good", "working", "which", "find", "please", "for", "the", "a", "an", "and", "me", "no", "without", "can", "we", "any", "i", "should", "get", "now", "do", "you", "have", "is", "there", "what", "about", "how", "add", "adding", "please recommend"}
+            stop = {"stremio", "addon", "addons", "add-on", "add-ons", "repo", "repos", "repository", "plugin", "plugins", "extension", "extensions", "movie", "movies", "tv", "show", "shows", "series", "content", "default", "limited", "torrent", "torrents", "give", "give me", "want", "need", "recommend", "suggest", "best", "good", "working", "which", "find", "please", "for", "the", "a", "an", "and", "me", "no", "without", "can", "we", "any", "i", "should", "get", "now", "do", "you", "have", "is", "there", "what", "about", "how", "add", "adding", "one", "please recommend"}
             words = [word for word in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", lower) if word not in stop]
             if words:
                 params.append("search=" + quote(" ".join(words[:3])))
@@ -1735,7 +1740,7 @@ def repo_content_label(prompt: str, mode: str, lang: str = "") -> str:
     elif any(k in lower for k in ("movie", "movies", "tv", "show", "shows", "series")):
         bits.append("Movie & TV")
     if not bits:
-        bits.append({"aniyomi": "Anime", "movie": "Movie & TV", "cloudstream": "CloudStream", "stremio": "Stremio"}.get(mode, "content"))
+        bits.append({"aniyomi": "Anime", "movie": "Movie & TV", "cloudstream": "CloudStream", "stremio": "Stremio", "both": "CloudStream"}.get(mode, "content"))
     return " ".join(dict.fromkeys(bits))
 
 def check_language_match(check: dict, lang: str) -> bool:
@@ -1782,7 +1787,7 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
         url = check["url"].lower()
         if mode == "aniyomi":
             return 0 if "yuzono" in url else 1
-        if mode in ("cloudstream", "movie"):
+        if mode in ("cloudstream", "movie", "both"):
             if "phisher" in url:
                 return 0
             if "cnc" in url:
@@ -1924,6 +1929,15 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
         repo_text = format_repo_checks(clean_checks, prompt, preferred)
         if repo_text:
             parts.append(repo_text)
+    if mode == "both":
+        addons, loaded = await stremio_addons(prompt)
+        if addons:
+            parts.append(format_stremio_addons(addons))
+        elif loaded and not parts:
+            if no_torrents_requested(prompt):
+                parts.append("I checked stremio-addons.net but didn't find a matching non-torrent add-on.")
+            else:
+                parts.append("I checked stremio-addons.net but didn't find a matching add-on.")
     return "\n\n".join(parts) or None
 
 async def gather_context(prompt: str) -> str:
