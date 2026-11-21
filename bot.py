@@ -49,7 +49,25 @@ REPO_URL_RE = re.compile(r"https?://[^\s<>()]+", re.I)
 PHISHER_REPO = "https://raw.githubusercontent.com/phisher98/cloudstream-extensions-phisher/refs/heads/builds/repo.json"
 CNC_REPO = "https://raw.githubusercontent.com/NivinCNC/CNCVerse-Cloud-Stream-Extension/refs/heads/builds/CNC.json"
 YUZONO_ANIME_REPO = "https://raw.githubusercontent.com/yuzono/anime-repo/repo/index.min.json"
-LANGUAGE_HINTS = ("spanish","español","espanol","es","castellano","french","francais","français","italian","italiano","german","deutsch","japanese","nihongo","portuguese","brazilian","korean","chinese","mandarin","arabic","hindi","urdu","bengali","tamil","telugu","malayalam","indonesian","thai","vietnamese","turkish","russian","polish","dutch","swedish","norwegian","danish","finnish","greek","hebrew","filipino")
+LANGUAGE_HINTS = ("spanish","español","espanol","es","castellano","french","francais","français","italian","italiano","german","deutsch","japanese","nihongo","portuguese","brazilian","korean","chinese","mandarin","arabic","hindi","urdu","bengali","tamil","telugu","malayalam","indonesian","thai","vietnamese","turkish","russian","polish","dutch","swedish","norwegian","danish","finnish","greek","hebrew","filipino","english")
+REPO_LANGUAGE_ALIASES = {
+    "spanish": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
+    "es": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
+    "español": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
+    "espanol": ("spanish", "español", "espanol", "castellano", "latino", "latina"),
+    "castellano": ("spanish", "español", "espanol", "castellano"),
+    "french": ("french", "français", "francais"),
+    "italian": ("italian", "italiano"),
+    "german": ("german", "deutsch"),
+    "deutsch": ("german", "deutsch"),
+    "japanese": ("japanese", "nihongo", "日本"),
+    "portuguese": ("portuguese", "português", "portugues"),
+    "brazilian": ("brazilian", "brasil", "português"),
+    "korean": ("korean", "한국"),
+    "chinese": ("chinese", "mandarin", "中文"),
+    "mandarin": ("mandarin", "chinese", "中文"),
+    "english": ("english", "eng"),
+}
 WAIT_LINES = (
     "Hold on, checking a few repos.",
     "Gimme a minute, testing these.",
@@ -957,6 +975,7 @@ async def web_search(query: str) -> list:
     errors = []
     sources = (
         ("POST", "https://lite.duckduckgo.com/lite/", {"data": {"q": query, "kl": "us-en"}}, parse_ddg_results),
+        ("GET", "https://lite.duckduckgo.com/lite/", {"params": {"q": query, "kl": "us-en"}}, parse_ddg_results),
         ("GET", "https://search.brave.com/search", {"params": {"q": query}}, parse_brave_results),
     )
     async with aiohttp.ClientSession() as session:
@@ -1688,6 +1707,33 @@ def pick_plugin_names(plugins: list, prompt: str, preferred: list | None = None)
             matches.append(name)
     return matches[:4]
 
+def repo_content_label(prompt: str, mode: str, lang: str = "") -> str:
+    lower = prompt.lower()
+    bits = []
+    if lang:
+        bits.append(lang.capitalize())
+    if any(k in lower for k in ("nsfw", "adult", "hentai", "xxx")):
+        bits.append("NSFW")
+    if any(k in lower for k in ("4k", "uhd", "2160", "high quality")):
+        bits.append("4K")
+    if any(k in lower for k in ("live", "sport", "sports", "match", "iptv", "channel")):
+        bits.append("Live TV/sports")
+    if any(k in lower for k in ("anime", "aniyomi", "manga")):
+        bits.append("Anime")
+    elif any(k in lower for k in ("movie", "movies", "tv", "show", "shows", "series")):
+        bits.append("Movie & TV")
+    if not bits:
+        bits.append({"aniyomi": "Anime", "movie": "Movie & TV", "cloudstream": "CloudStream", "stremio": "Stremio"}.get(mode, "content"))
+    return " ".join(dict.fromkeys(bits))
+
+def check_language_match(check: dict, lang: str) -> bool:
+    if not lang:
+        return False
+    aliases = REPO_LANGUAGE_ALIASES.get(lang.lower(), (lang.lower(),))
+    plugins = check.get("plugins") or check.get("names") or []
+    haystack = check.get("url", "") + " " + " ".join(plugin_text(item) for item in plugins[:40])
+    return any(re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", haystack, re.I) for alias in aliases)
+
 def fallback_plugin_names(check: dict, prompt: str, limit: int = 4) -> list:
     records = check.get("plugins") or check.get("names") or []
     skip_torrents = no_torrents_requested(prompt)
@@ -1735,7 +1781,7 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
         return 2
     if verified:
         verified.sort(key=lambda check: (
-            0 if lang and re.search(rf"(?<![a-z]){re.escape(lang)}(?![a-z])", (check["url"] + " " + " ".join(check.get("names", []))).lower()) else (1 if lang else 0),
+            0 if lang and check_language_match(check, lang) else (1 if lang else 0),
             named_rank(check),
             -best_plugin_score(check, prompt),
             repo_rank(check),
@@ -1744,38 +1790,26 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
     lines = []
     if verified:
         first = verified[0]
-        lines.append(f"Here's one I verified: {first['url']} ({first['count']} plugins).")
-        if first.get("mature"):
-            lines.append("Mature: yes")
-        if first.get("score"):
-            lines.append(f"Rating: {first['score']}")
-        if first.get("types"):
-            lines.append(f"Types: {first['types']}")
-        if first.get("catalogs"):
-            lines.append(f"Catalogs: {first['catalogs']}")
+        label = repo_content_label(prompt, mode, lang)
+        lines.append(f"Verified {label} repo: {first['url']}")
+        lines.append(f"{first['count']} entries checked.")
         names = pick_plugin_names(first.get("plugins") or first.get("names", []), prompt, preferred)
-        fallback_used = False
-        if not names and any(k in prompt_lower for k in ("plugin", "plugins")) and not preferred:
+        if not names and any(k in prompt_lower for k in ("plugin", "plugins", "extension", "extensions")) and not preferred:
             names = fallback_plugin_names(first, prompt)
-            if names:
-                lines.append("Plugins in that manifest: " + ", ".join(names))
-                fallback_used = True
         if names:
-            if not fallback_used:
-                lines.append(("Suggested: " if preferred else "Plugins: ") + ", ".join(names))
+            hint = f"for {label}" if label not in ("CloudStream", "Stremio", "content") else ""
+            lines.append(f"Try these{hint}: {', '.join(names)}")
             if preferred:
                 missing = [want for want in preferred if not any(plugin_name_matches(name, want) for name in names)]
                 if missing:
                     lines.append("Not in that manifest: " + ", ".join(missing))
-        elif any(k in prompt.lower() for k in ("plugin", "plugins", "extension", "extensions", "addon", "add-on")):
-            lines.append("I checked that manifest and couldn't find a matching plugin; test it manually before relying on it.")
-        if len(verified) > 1:
-            also = verified[1:3] if mode == "aniyomi" else verified[1:2]
-            lines.append("Also verified: " + ", ".join(check["url"] for check in also))
+        elif any(k in prompt_lower for k in ("plugin", "plugins", "extension", "extensions")):
+            lines.append("I couldn't confirm specific names in that manifest; open it and test one manually.")
+        if first.get("mature"):
+            lines.append("Mature content: yes")
+        lines.append("Add it in Extension Manager, enable what you need, then search inside Sanin.")
     else:
-        lines.append("I couldn't verify a working repo from those results; test any repo manually before relying on it.")
-    if unverified:
-        lines.append("Unverified: " + ", ".join(check["url"] for check in unverified[:3]))
+        lines.append("I couldn't verify a working repo from those results. Check the search links manually before relying on one.")
     return "\n".join(lines)
 
 async def repo_recommendation(prompt: str, facts: list | None = None) -> str | None:
@@ -1807,10 +1841,13 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
     elif "cloudstream" not in lower:
         queries.append(prompt + " cloudstream")
     if lang:
-        queries.append(f"{lang} {mode} repo")
-    if "reddit" not in lower:
+        queries.append(f"{lang} {mode} repo json")
+        queries.append(f"{lang} cloudstream repo github json")
+        queries.append(f"{lang} aniyomi repo github json")
+        queries.append(f"{lang} extension repo site:reddit.com")
+    if "reddit" not in lower and not lang:
         queries.append(prompt + " reddit")
-    queries = list(dict.fromkeys(queries))[:3]
+    queries = list(dict.fromkeys(queries))[:5]
 
     results = await asyncio.gather(
         *(web_search(query) for query in queries),
@@ -1860,10 +1897,13 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
 
     if mode == "aniyomi":
         candidates = [url for url in candidates if not any(k in url.lower() for k in ("cloudstream", "cloud-stream", "stremio"))]
+    elif lang:
+        candidates = [url for url in candidates if not any(k in url.lower() for k in ("yuzono", "anime-repo", "stremio", "manifest.json"))]
     else:
         candidates = [url for url in candidates if url in (PHISHER_REPO, CNC_REPO) or any(k in url.lower() for k in ("cloudstream", "cloud-stream", "cs3"))]
     if lang:
-        candidates.sort(key=lambda url: 0 if re.search(rf"(?<![a-z]){re.escape(lang)}(?![a-z])", url.lower()) else 1)
+        aliases = REPO_LANGUAGE_ALIASES.get(lang.lower(), (lang.lower(),))
+        candidates.sort(key=lambda url: 0 if any(alias in url.lower() for alias in aliases) else 1)
     candidates = candidates[:6]
     parts = []
     if candidates:
