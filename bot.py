@@ -640,17 +640,7 @@ def decode_search_url(href: str) -> str:
             return unquote(target[0])
     return href
 
-async def web_search(query: str) -> list:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            "https://lite.duckduckgo.com/lite/",
-            params={"q": query},
-            headers=WEB_HEADERS,
-            timeout=aiohttp.ClientTimeout(total=12),
-        ) as resp:
-            if resp.status != 200:
-                raise Exception(f"search HTTP {resp.status}")
-            html = await resp.text()
+def parse_ddg_results(html: str) -> list:
     links = re.findall(r"<a[^>]+href=\"([^\"]+)\"[^>]*class=['\"]result-link['\"][^>]*>(.*?)</a>", html, re.S)
     snippets = re.findall(r"<td class=['\"]result-snippet['\"]>(.*?)</td>", html, re.S)
     results = []
@@ -662,6 +652,53 @@ async def web_search(query: str) -> list:
         if title and url.startswith("http"):
             results.append({"title": title, "snippet": snippet, "url": url})
     return results
+
+def parse_brave_results(html: str) -> list:
+    results = []
+    for match in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', html, re.S):
+        url = unescape(match.group(1))
+        block = match.group(2)
+        title_match = re.search(r'<div class="title search-snippet-title[^"]*"[^>]*>(.*?)</div>', block, re.S)
+        if not title_match:
+            continue
+        title = " ".join(unescape(re.sub(r"<[^>]+>", " ", title_match.group(1))).split())
+        if title and url not in [item["url"] for item in results]:
+            results.append({"title": title, "snippet": "", "url": url})
+        if len(results) >= 5:
+            break
+    return results
+
+async def web_search(query: str) -> list:
+    headers = {
+        **WEB_HEADERS,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Cache-Control": "no-cache",
+        "Referer": "https://lite.duckduckgo.com/",
+    }
+    errors = []
+    async with aiohttp.ClientSession() as session:
+        for url, parser in (
+            ("https://lite.duckduckgo.com/lite/", parse_ddg_results),
+            ("https://search.brave.com/search", parse_brave_results),
+        ):
+            try:
+                async with session.get(
+                    url,
+                    params={"q": query},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=12),
+                ) as resp:
+                    if resp.status != 200:
+                        errors.append(f"HTTP {resp.status}")
+                        continue
+                    html = await resp.text()
+                results = parser(html)
+                if results:
+                    return results
+                errors.append("empty results")
+            except Exception as e:
+                errors.append(str(e)[:80])
+    raise Exception("search " + ", ".join(errors))
 
 def is_public_repo_url(url: str) -> bool:
     parsed = urlparse(url)
