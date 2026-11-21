@@ -2627,8 +2627,10 @@ async def unban_slash(interaction: discord.Interaction, user: str, reason: str, 
     if not await require_owner(interaction):
         return
     await interaction.response.defer(ephemeral=True)
+    logging.info(f"/unban by {interaction.user} target={user!r}")
     user = await resolve_user(interaction.guild, user)
     if user is None:
+        logging.warning(f"/unban could not resolve target {user!r}")
         await interaction.followup.send("User not found. Use @mention, their username, or their user ID.", ephemeral=True)
         return
     reason = reason.strip()
@@ -2636,10 +2638,12 @@ async def unban_slash(interaction: discord.Interaction, user: str, reason: str, 
         await interaction.followup.send("Give a reason.", ephemeral=True)
         return
     if not await ensure_bot_permission(interaction, "ban_members"):
+        logging.warning("/unban missing bot ban_members permission")
         return
     try:
         await interaction.guild.fetch_ban(user)
     except discord.NotFound:
+        logging.info(f"/unban target is not banned: {user}")
         await interaction.followup.send("That user is not banned.", ephemeral=True)
         return
     except Exception as e:
