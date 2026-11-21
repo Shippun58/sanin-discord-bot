@@ -47,6 +47,15 @@ WAIT_LINES = (
     "On it, checking which one actually works.",
     "One sec, verifying a repo.",
     "Hang on, testing a couple of options.",
+    "Give me a sec, verifying this.",
+    "Alright, testing these now.",
+    "Let me check what actually works.",
+    "Looking through the repos now.",
+    "Quick check, then I'll answer.",
+    "Checking the manifests.",
+    "One moment, seeing what's live.",
+    "Hang tight, running a quick check.",
+    "Let me sort out the working ones.",
 )
 
 GROQ_KEYS = [k.strip() for k in GROQ_KEYS_STR.split(",") if k.strip()]
@@ -122,6 +131,7 @@ Accuracy
 - Talk about rumors as rumors: what is known, what is reported, and what is still speculation. Never brush off a question just because it is not about Sanin.
 - Answer directly. If a current number is not in the data, give your best knowledge-based answer and flag it as possibly outdated instead of telling the user where to look.
 - Treat short follow-ups and replies as continuations of the conversation. When someone asks "what about X" or replies to your last message, stay on the same topic and resolve X against the previous exchange instead of answering the words literally.
+- Never name a specific extension, plugin, or add-on unless it appears in verified data, the manual, or a manifest that was actually checked. If it is missing or removed, say that plainly and tell them to test the repo themselves.
 - Never fabricate a link or present a guessed release date as fact.
 """
 
@@ -705,10 +715,17 @@ async def inspect_repo(url: str) -> dict:
     if not items:
         result["error"] = "manifest has no plugins"
         return result
-    names = [
-        str(item.get("name") or item.get("internalName") or item.get("pkg") or item.get("id") or "unnamed")[:50]
-        for item in items if isinstance(item, dict)
-    ]
+    plugins = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        plugins.append({
+            "name": str(item.get("name") or item.get("internalName") or item.get("pkg") or item.get("id") or "unnamed")[:50],
+            "description": str(item.get("description") or "")[:300],
+            "language": str(item.get("language") or ""),
+            "tvTypes": " ".join(str(t) for t in item.get("tvTypes", []) if t) if isinstance(item.get("tvTypes"), list) else "",
+        })
+    names = [plugin["name"] for plugin in plugins]
     first = items[0] if items and isinstance(items[0], dict) else {}
     mature = any(
         item.get("mature") or item.get("nsfw") or item.get("adult") or item.get("isAdult")
@@ -724,6 +741,7 @@ async def inspect_repo(url: str) -> dict:
         count=len(items),
         valid_urls=sum(1 for item in items if isinstance(item, dict) and str(item.get("url", "")).startswith("http")),
         names=names,
+        plugins=plugins,
         sample=", ".join(names[:8]),
         mature=bool(mature),
         score=score,
@@ -759,11 +777,17 @@ def asks_extension_repo(prompt: str) -> bool:
         return False
     if any(k in lower for k in ("how to add", "how do i add", "how can i add")):
         return False
+    if any(k in lower for k in ("not working", "broken", "error", "won't", "doesn't", "isn't", "crash")) and not REPO_URL_RE.search(prompt):
+        return False
     if any(k in lower for k in ("repo", "repository")):
         return True
     if REPO_URL_RE.search(prompt):
         return any(k in lower for k in ("test", "check", "valid", "work", "broken"))
     if any(k in lower for k in ("nsfw", "adult", "hentai")) and any(k in lower for k in ("extension", "addon", "add-on", "plugin")):
+        return True
+    if any(k in lower for k in ("addon", "add-on")):
+        if any(k in lower for k in ("not working", "broken", "error", "won't", "doesn't", "isn't")):
+            return False
         return True
     return "extension" in lower and any(k in lower for k in ("find", "recommend", "suggest", "which", "best", "good", "working"))
 
@@ -808,7 +832,11 @@ async def wotaku_repos(prompt: str) -> str:
         categories = ["lnreader", "ireader"]
     elif "manga" in lower:
         categories = ["mihon"]
-    elif any(k in lower for k in ("anime", "movie", "live action", "source", "cloudstream", "sanin")):
+    elif any(k in lower for k in ("anime", "aniyomi")):
+        categories = ["aniyomi"]
+    elif any(k in lower for k in ("movie", "movies", "tv", "show", "series")):
+        categories = ["cloudstream"]
+    elif any(k in lower for k in ("live action", "source", "cloudstream", "sanin")):
         categories = ["cloudstream", "aniyomi"]
     else:
         categories = ["cloudstream", "aniyomi"]
@@ -866,10 +894,14 @@ def repo_relevance_score(item: dict, prompt: str) -> int:
 
 def repo_mode(prompt: str) -> str:
     lower = prompt.lower()
-    if "stremio" in lower or "movie" in lower or "movies" in lower:
+    if "stremio" in lower:
+        return "stremio"
+    if any(k in lower for k in ("addon", "add-on")) and "aniyomi" not in lower:
         return "stremio"
     if "aniyomi" in lower or "anime" in lower:
         return "aniyomi"
+    if any(k in lower for k in ("movie", "movies", "tv", "show", "series")):
+        return "movie"
     return "cloudstream"
 
 def language_hint(prompt: str) -> str:
@@ -884,47 +916,179 @@ PLUGIN_INTENTS = {
     "nsfw": ("nsfw", "adult", "hentai", "18", "xxx", "porn"),
     "rating": ("imdb", "rating", "score", "metadata", "tmdb"),
     "metadata": ("metadata", "imdb", "tmdb", "trailer"),
-    "live": ("live", "sport", "tv"),
+    "live": ("live", "sport", "tv", "channel", "iptv", "ppv"),
     "anime": ("anime", "ani"),
     "dub": ("dub", "dubbed"),
     "sub": ("sub", "subtitle"),
 }
 
-def plugin_score(name: str, prompt: str) -> int:
+def plugin_text(plugin) -> str:
+    if isinstance(plugin, str):
+        return plugin
+    return " ".join(str(plugin.get(key, "")) for key in ("name", "description", "language", "tvTypes"))
+
+def plugin_score(plugin, prompt: str) -> int:
     lower = prompt.lower()
-    name_lower = name.lower()
+    text = plugin_text(plugin).lower()
     terms = set()
     for key, aliases in PLUGIN_INTENTS.items():
-        if key in lower:
+        if re.search(rf"(?<![a-z]){re.escape(key)}(?![a-z])", lower):
             terms.update(aliases)
     for word in re.findall(r"[a-z0-9]{4,}", lower):
         if word not in {"repo", "repository", "extension", "plugin", "cloudstream", "aniyomi", "stremio", "sanin", "best", "good", "working", "show", "give", "find", "which", "that", "with", "from"}:
             terms.add(word)
-    return sum(1 for term in terms if term in name_lower)
+    return sum(1 for term in terms if term in text)
 
 def best_plugin_score(check: dict, prompt: str) -> int:
-    scores = [plugin_score(name, prompt) for name in check.get("names", [])]
+    plugins = check.get("plugins") or check.get("names", [])
+    scores = [plugin_score(plugin, prompt) for plugin in plugins]
     return max(scores) if scores else 0
 
-def pick_plugin_names(names: list, prompt: str) -> list:
-    scored = sorted(((plugin_score(name, prompt), name) for name in names), key=lambda item: -item[0])
-    matches = [name for score, name in scored if score > 0]
-    if matches:
-        return matches[:3]
-    return names[:2]
+def stremio_query(prompt: str) -> str:
+    lower = prompt.lower()
+    params = ["limit=5"]
+    if any(k in lower for k in ("nsfw", "adult", "hentai", "porn", "xxx", "18+")):
+        params.append("nsfw=only")
+    elif "rating" in lower or "imdb" in lower:
+        params.append("search=rating")
+    elif any(k in lower for k in ("subtitle", "subtitles", "sub")):
+        params.append("search=subtitle")
+    else:
+        lang = language_hint(prompt)
+        if lang:
+            params.append("search=" + quote(lang))
+        else:
+            stop = {"stremio", "addon", "addons", "add-on", "repo", "repository", "movie", "movies", "tv", "show", "shows", "series", "content", "give", "give me", "want", "need", "recommend", "suggest", "best", "good", "working", "which", "find", "please", "for", "the", "a", "an", "and", "me"}
+            words = [word for word in re.findall(r"[a-z0-9]{2,}", lower) if word not in stop]
+            if words:
+                params.append("search=" + quote(" ".join(words[:3])))
+    params.extend(["sort_by=stars", "order=desc"])
+    return "https://stremio-addons.net/api/v0/addons?" + "&".join(params)
 
-def format_repo_checks(checks: list, prompt: str = "") -> str | None:
+async def stremio_addons(prompt: str) -> list:
+    url = stremio_query(prompt)
+    data = None
+    try:
+        data = await fetch_json(url, timeout=8)
+    except Exception:
+        try:
+            text = await fetch_text("https://r.jina.ai/http://" + url, timeout=20)
+            start = text.find("{")
+            if start >= 0:
+                data = json.loads(text[start:])
+        except Exception as e:
+            logging.warning(f"Stremio addon search failed: {e}")
+    if not isinstance(data, dict):
+        return []
+    addons = []
+    for item in data.get("addons", [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        manifest = item.get("manifest") if isinstance(item.get("manifest"), dict) else {}
+        name = manifest.get("name") or item.get("name") or item.get("slug")
+        manifest_url = item.get("manifestUrl")
+        if not name or not manifest_url:
+            continue
+        addons.append({
+            "name": str(name)[:60],
+            "url": manifest_url,
+            "nsfw": bool(item.get("nsfw") or manifest.get("mature")),
+            "stars": item.get("stars"),
+            "description": str(manifest.get("description") or "")[:120],
+        })
+    return addons
+
+def format_stremio_addons(addons: list) -> str:
+    if not addons:
+        return ""
+    lines = ["Stremio add-ons:"]
+    for addon in addons[:3]:
+        label = addon["name"] + (" (NSFW)" if addon.get("nsfw") else "")
+        if addon.get("stars"):
+            label += f" ({addon['stars']} stars)"
+        lines.append(f"- {label}: {addon['url']}")
+    lines.append("Source: https://stremio-addons.net/")
+    return "\n".join(lines)
+
+def memory_repo_preferences(prompt: str, facts: list | None) -> list:
+    if not facts:
+        return []
+    mode = repo_mode(prompt)
+    if mode not in ("aniyomi", "cloudstream", "stremio", "movie"):
+        return []
+    names = []
+    for fact in facts:
+        lower = fact.lower()
+        if mode == "aniyomi" and not any(k in lower for k in ("anime", "aniyomi")):
+            continue
+        if mode in ("cloudstream", "movie") and not any(k in lower for k in ("cloudstream", "movie", "movies", "plugin", "plugins")):
+            continue
+        if mode == "stremio" and not any(k in lower for k in ("stremio", "addon", "add-on")):
+            continue
+        for match in re.finditer(r"\b(?:suggest|recommend)\b\s*(?:these\s+|some\s+|the\s+)?(?:extensions?\s+|plugins?\s+|sources?\s+)?(.+)", fact, re.I):
+            chunk = re.split(r"\b(?:when|if|then|for)\b", match.group(1), flags=re.I)[0]
+            for part in re.split(r",|/|&|\band\b", chunk):
+                name = part.strip(" .;:-*_`")
+                name = re.sub(r"^(?:these|some|the)\s+", "", name, flags=re.I)
+                name = re.sub(r"\s+(?:extensions?|plugins?|sources?)$", "", name, flags=re.I)
+                if 2 <= len(name) <= 40 and not re.search(r"\b(repo|repositor|user|url|ask|give)\b", name, re.I):
+                    names.append(name)
+    unique = []
+    seen = set()
+    for name in names:
+        key = re.sub(r"[^a-z0-9]+", "", name.lower())
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(name)
+    return unique
+
+def plugin_name_matches(name: str, want: str) -> bool:
+    def plain(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", value.lower())
+    wanted = plain(want)
+    available = plain(name)
+    for prefix in ("aniyomi", "cloudstream", "stremio"):
+        if available.startswith(prefix):
+            available = available[len(prefix):]
+    return bool(wanted) and (wanted == available or available.startswith(wanted) or available.endswith(wanted))
+
+def pick_plugin_names(plugins: list, prompt: str, preferred: list | None = None) -> list:
+    records = [plugin if isinstance(plugin, dict) else {"name": str(plugin)} for plugin in plugins]
+    if preferred:
+        chosen = []
+        for want in preferred:
+            for record in records:
+                name = record.get("name", "")
+                if plugin_name_matches(name, want):
+                    if name and name not in chosen:
+                        chosen.append(name)
+                    break
+        return chosen[:6]
+    scored = sorted(((plugin_score(record, prompt), record.get("name", "")) for record in records), key=lambda item: -item[0])
+    matches = []
+    for score, name in scored:
+        if score > 0 and name and name not in matches:
+            matches.append(name)
+    return matches[:4]
+
+def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = None) -> str | None:
     verified = [check for check in checks if check.get("ok")]
     unverified = [check for check in checks if not check.get("ok")]
     if not verified and not unverified:
         return None
     lang = language_hint(prompt)
     mode = repo_mode(prompt)
+    prompt_lower = prompt.lower()
+    stop_words = {"repo", "repos", "repository", "plugin", "plugins", "extension", "extensions", "addon", "addons", "stremio", "cloudstream", "aniyomi", "stream", "streaming", "best", "good", "working", "find", "give", "from", "with", "that", "this", "need", "want", "please"}
+    named_repos = {word for word in re.findall(r"[a-z0-9]{3,}", prompt_lower) if word not in stop_words}
+    def named_rank(check: dict) -> int:
+        url = check["url"].lower()
+        return 0 if any(word in url for word in named_repos) else 1
     def repo_rank(check: dict) -> int:
         url = check["url"].lower()
         if mode == "aniyomi":
             return 0 if "yuzono" in url else 1
-        if mode == "cloudstream":
+        if mode in ("cloudstream", "movie"):
             if "phisher" in url:
                 return 0
             if "cnc" in url:
@@ -936,8 +1100,9 @@ def format_repo_checks(checks: list, prompt: str = "") -> str | None:
     if verified:
         verified.sort(key=lambda check: (
             0 if lang and re.search(rf"(?<![a-z]){re.escape(lang)}(?![a-z])", (check["url"] + " " + " ".join(check.get("names", []))).lower()) else (1 if lang else 0),
-            repo_rank(check),
+            named_rank(check),
             -best_plugin_score(check, prompt),
+            repo_rank(check),
             -check.get("count", 0),
         ))
     lines = []
@@ -952,18 +1117,24 @@ def format_repo_checks(checks: list, prompt: str = "") -> str | None:
             lines.append(f"Types: {first['types']}")
         if first.get("catalogs"):
             lines.append(f"Catalogs: {first['catalogs']}")
-        names = pick_plugin_names(first.get("names", []), prompt)
+        names = pick_plugin_names(first.get("plugins") or first.get("names", []), prompt, preferred)
         if names:
-            lines.append("Plugins: " + ", ".join(names))
+            lines.append(("Suggested: " if preferred else "Plugins: ") + ", ".join(names))
+            if preferred:
+                missing = [want for want in preferred if not any(plugin_name_matches(name, want) for name in names)]
+                if missing:
+                    lines.append("Not in that manifest: " + ", ".join(missing))
+        elif any(k in prompt.lower() for k in ("plugin", "plugins", "extension", "extensions", "addon", "add-on")):
+            lines.append("I checked that manifest and couldn't find a matching plugin; test it manually before relying on it.")
         if len(verified) > 1:
             lines.append("Also verified: " + ", ".join(check["url"] for check in verified[1:2]))
     else:
-        lines.append("I couldn't verify a working repo from those results.")
+        lines.append("I couldn't verify a working repo from those results; test any repo manually before relying on it.")
     if unverified:
         lines.append("Unverified: " + ", ".join(check["url"] for check in unverified[:3]))
     return "\n".join(lines)
 
-async def repo_recommendation(prompt: str) -> str | None:
+async def repo_recommendation(prompt: str, facts: list | None = None) -> str | None:
     if not asks_extension_repo(prompt):
         return None
     direct = REPO_URL_RE.search(prompt)
@@ -973,10 +1144,11 @@ async def repo_recommendation(prompt: str) -> str | None:
     lower = prompt.lower()
     mode = repo_mode(prompt)
     lang = language_hint(prompt)
+    preferred = memory_repo_preferences(prompt, facts)
     queries = [prompt]
     if mode == "aniyomi":
         queries.append(prompt + " aniyomi repo")
-    elif mode == "stremio":
+    elif mode in ("stremio", "movie"):
         queries.append(prompt + " stremio addon")
     elif "cloudstream" not in lower:
         queries.append(prompt + " cloudstream")
@@ -994,7 +1166,7 @@ async def repo_recommendation(prompt: str) -> str | None:
 
     if mode == "aniyomi":
         candidates = [YUZONO_ANIME_REPO]
-    elif mode == "cloudstream":
+    elif mode in ("cloudstream", "movie"):
         candidates = [PHISHER_REPO, CNC_REPO]
     else:
         candidates = []
@@ -1037,11 +1209,20 @@ async def repo_recommendation(prompt: str) -> str | None:
     if lang:
         candidates.sort(key=lambda url: 0 if re.search(rf"(?<![a-z]){re.escape(lang)}(?![a-z])", url.lower()) else 1)
     candidates = candidates[:6]
-    if not candidates:
-        return None
-    checks = await asyncio.gather(*(inspect_repo(url) for url in candidates), return_exceptions=True)
-    clean_checks = [check for check in checks if isinstance(check, dict)]
-    return format_repo_checks(clean_checks, prompt)
+    parts = []
+    if candidates:
+        checks = await asyncio.gather(*(inspect_repo(url) for url in candidates), return_exceptions=True)
+        clean_checks = [check for check in checks if isinstance(check, dict)]
+        repo_text = format_repo_checks(clean_checks, prompt, preferred)
+        if repo_text:
+            parts.append(repo_text)
+    if mode in ("stremio", "movie"):
+        addons = await stremio_addons(prompt)
+        if addons:
+            parts.append(format_stremio_addons(addons))
+        else:
+            parts.append("I couldn't load stremio-addons.net to verify an add-on; check that site manually.")
+    return "\n\n".join(parts) or None
 
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
@@ -1135,7 +1316,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     if asks_extension_repo(user_prompt):
         if status:
             await status()
-        repo_answer = await repo_recommendation(user_prompt)
+        repo_answer = await repo_recommendation(user_prompt, memory["facts"])
         if repo_answer:
             add_to_history(session_key, "user", user_prompt)
             add_to_history(session_key, "assistant", repo_answer)
