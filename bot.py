@@ -1121,6 +1121,10 @@ def is_media_lookup_prompt(prompt: str) -> bool:
     smalltalk = r"^(hi|hello|hey|yo|thanks|thank you|ok|okay|yes|no|what|why|how|where|who)[!. ]*$"
     if re.fullmatch(smalltalk, lower):
         return False
+    if re.match(r"^(i'm|im|i mean|i asked|i said|my question|what i meant|generic question)\b", lower):
+        return False
+    if re.match(r"^(best|top|any|some|recommend|recommend me|suggest|give me)\b", lower):
+        return False
     if re.match(r"^what is\b", lower) and not re.search(r"\b(your|you|this|that|it)\b", lower):
         return True
     if re.match(r"^(who|what|why|how|where|which|can|could|should|would|will|do|does)\b", lower) and not re.search(r"\b(anime|manga|movie|show|series|tv|release|episode|chapter|score|about|title|form|arc)\b", lower):
@@ -1134,7 +1138,8 @@ def is_media_lookup_prompt(prompt: str) -> bool:
 def extract_media_title(prompt: str) -> str:
     text = prompt.strip().rstrip("?!.")
     text = re.sub(r"^(?:hey|hi|hello|san)\b[,\s]+", "", text, flags=re.I)
-    text = re.sub(r"^(?:tell me about|what is|who is|info on|information on|about|do you know)\s+", "", text, flags=re.I)
+    text = re.sub(r"^(?:tell me about|what is|who is|info on|information on|about|do you know|is)\s+", "", text, flags=re.I)
+    text = re.sub(r"\s+(?:anime|manga)\s+or\s+(?:live action|movie|tv|tv show|tv series)\s*$", "", text, flags=re.I)
     return text.strip()[:80]
 
 def normalize_media_title(value: str) -> str:
@@ -1189,11 +1194,19 @@ def format_media_hit(source: str, item: dict) -> str:
         text += f" — {url}"
     return text
 
+def looks_like_media_title(title: str) -> bool:
+    lower = title.lower().strip()
+    if len(title.split()) > 6 or "?" in title:
+        return False
+    if re.search(r"\b(i'm|im|i|you|your|me|my|we|us|asking|question|annoying|good|best|worst|top|recommend|suggest|why|what|how|who|where|which|can|could|should|would|will|do|does|is|are|was|were)\b", lower):
+        return False
+    return len(re.sub(r"[^a-z0-9]+", "", lower)) >= 2
+
 async def media_disambiguation(prompt: str) -> str | None:
     if not is_media_lookup_prompt(prompt):
         return None
     title = extract_media_title(prompt)
-    if len(title) < 2:
+    if len(title) < 2 or not looks_like_media_title(title):
         return None
     lower = prompt.lower()
     explicit_anime = any(k in lower for k in ("anime", "manga"))
