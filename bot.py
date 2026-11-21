@@ -40,6 +40,11 @@ WEB_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; SaninBot/1.0; +https://sanin-discord-bot.onrender.com/healthz)",
     "Accept-Language": "en-US,en;q=0.8",
 }
+STREMIO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 REPO_URL_RE = re.compile(r"https?://[^\s<>()]+", re.I)
 PHISHER_REPO = "https://raw.githubusercontent.com/phisher98/cloudstream-extensions-phisher/refs/heads/builds/repo.json"
 CNC_REPO = "https://raw.githubusercontent.com/NivinCNC/CNCVerse-Cloud-Stream-Extension/refs/heads/builds/CNC.json"
@@ -1049,13 +1054,16 @@ async def stremio_addons(prompt: str) -> tuple[list, bool]:
     url = stremio_query(prompt)
     data = None
     try:
-        data = await fetch_json(url, timeout=8)
-    except Exception:
+        data = await fetch_json(url, headers=STREMIO_HEADERS, timeout=15)
+    except Exception as e:
+        logging.warning(f"Stremio direct fetch failed: {e}")
         try:
-            text = await fetch_text("https://r.jina.ai/http://" + url, timeout=20)
+            text = await fetch_text("https://r.jina.ai/http://" + url, headers=STREMIO_HEADERS, timeout=20)
             start = text.find("{")
             if start >= 0:
                 data = json.loads(text[start:])
+            else:
+                logging.warning("Stremio fallback returned no JSON")
         except Exception as e:
             logging.warning(f"Stremio addon search failed: {e}")
     if not isinstance(data, dict):
@@ -1408,6 +1416,12 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     global groq_key_index
 
     session_key = f"{channel_id}:{user_id or user_name}"
+    retry_re = re.compile(r"(?:retry|try again|again|recheck|check again|try it again)[!. ]*", re.I)
+    if retry_re.fullmatch(user_prompt.strip()):
+        for entry in reversed(conversation_history[session_key]):
+            if entry.get("role") == "user" and not retry_re.fullmatch(str(entry.get("content", "")).strip()):
+                user_prompt = str(entry["content"])
+                break
     memory = await load_memory()
     canned = canonical_reply(user_prompt, memory["facts"])
     if canned:
