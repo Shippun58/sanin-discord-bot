@@ -1093,6 +1093,19 @@ def wants_recent_context(prompt: str) -> bool:
     )
     return any(re.search(pattern, lower) for pattern in patterns)
 
+def is_plugin_followup(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    if len(prompt.split()) > 7:
+        return False
+    patterns = (
+        r"^which (?:plugins?|add-?ons?|repos?|ones?)",
+        r"^what (?:plugins?|add-?ons?|repos?|ones?)",
+        r"^any (?:plugins?|add-?ons?|repos?|recommendations?|suggestions?)",
+        r"\b(?:plugins?|add-?ons?|repos?)\b.{0,20}\b(?:for|about) (?:this|that|it)\b",
+        r"^(?:like that|suggestions?|recommendations?)[?!.]*$",
+    )
+    return any(re.search(pattern, lower) for pattern in patterns)
+
 def asks_extension_repo(prompt: str) -> bool:
     lower = prompt.lower()
     if wants_sanin_links(prompt):
@@ -1242,7 +1255,11 @@ def is_bare_repo_request(prompt: str) -> bool:
 
 def repo_mode(prompt: str) -> str:
     lower = prompt.lower()
-    if "stremio" in lower or "addon" in lower or "add-on" in lower:
+    if "stremio" in lower:
+        return "stremio"
+    if any(k in lower for k in ("live", "sports", "sport", "match", "iptv", "channel")):
+        return "movie"
+    if "addon" in lower or "add-on" in lower:
         return "stremio"
     if "aniyomi" in lower or "anime" in lower:
         return "aniyomi"
@@ -1706,6 +1723,12 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
             if entry.get("role") == "user" and not retry_re.fullmatch(str(entry.get("content", "")).strip()):
                 user_prompt = str(entry["content"])
                 break
+    elif is_plugin_followup(user_prompt):
+        for entry in reversed(conversation_history[session_key]):
+            previous = str(entry.get("content", "")).strip() if entry.get("role") == "user" else ""
+            if previous and previous.lower() != user_prompt.lower() and not retry_re.fullmatch(previous):
+                user_prompt = f"{previous} - {user_prompt}"
+                break
     memory = await load_memory()
     hydrate_session(session_key, memory)
     allow_links = is_owner_id(user_id)
@@ -1729,7 +1752,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     verified = context if context is not None else await gather_context(user_prompt)
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
     if is_watch_request(user_prompt):
-        system_prompt += "\n\nWatch request: answer with steps to watch it inside Sanin only. Do not mention Netflix, Hulu, Crunchyroll, Prime Video, JustWatch, or any other app or site. Use Anime mode for anime and Movie & TV mode for movies/shows, then Extension Manager repo/add-on, Search, open the title, and switch server/source if needed."
+        system_prompt += "\n\nWatch request: answer with steps to watch it inside Sanin only. Do not mention Netflix, Hulu, Crunchyroll, Prime Video, JustWatch, or any other app or site. Use Anime mode for anime and Movie & TV mode for movies/shows, then Extension Manager repo/add-on, Search, open the title, and switch server/source if needed. Never name or recommend a specific repo, plugin, add-on, or wiki; give only the generic steps."
     manual = manual_context(user_prompt)
     if manual:
         system_prompt += "\n\nSanin support manual (use these exact paths and facts):\n" + manual
@@ -1766,6 +1789,8 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
             reply = f"Unfortunately I can't help with that. Ask <@{DEV_ID}> if you need a hand."
         else:
             reply = clean_reply(reply)
+            if is_watch_request(user_prompt):
+                reply = "\n".join(line for line in reply.splitlines() if not re.search(r"wotaku|wiki|livesports|sportsstream", line, re.I))
             if not allow_links:
                 reply = sanitize_sanin_links(reply)
             reply = redact_sensitive(reply)
