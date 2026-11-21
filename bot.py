@@ -136,6 +136,8 @@ Accuracy
 - Answer directly. If a current number is not in the data, give your best knowledge-based answer and flag it as possibly outdated instead of telling the user where to look.
 - Treat short follow-ups and replies as continuations of the conversation. When someone asks "what about X" or replies to your last message, stay on the same topic and resolve X against the previous exchange instead of answering the words literally.
 - Never name a specific extension, plugin, or add-on unless it appears in verified data, the manual, or a manifest that was actually checked. If it is missing or removed, say that plainly and tell them to test the repo themselves.
+- If asked where or how to watch a title, give steps inside Sanin. Never recommend Netflix, Hulu, Crunchyroll, Prime Video, JustWatch, or any other app/site unless the user explicitly asks for non-Sanin options.
+- If a plot detail, form, chapter, or ability is not confirmed by verified data, say it is unconfirmed or not in the manga/anime yet. Never invent new forms or events.
 - Never fabricate a link or present a guessed release date as fact.
 """
 
@@ -821,6 +823,10 @@ def extract_repo_urls(text: str) -> list:
             urls.append(url)
     return urls
 
+def is_watch_request(prompt: str) -> bool:
+    lower = prompt.lower()
+    return bool(re.search(r"\b(where|how)\b.{0,40}\b(watch|stream)\b", lower)) or "where to watch" in lower
+
 def asks_extension_repo(prompt: str) -> bool:
     lower = prompt.lower()
     if wants_sanin_links(prompt):
@@ -1278,7 +1284,7 @@ async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
     parts = []
     jobs = []
-    if len(prompt.split()) >= 2 and not re.fullmatch(r"(hi|hello|hey|yo|thanks|thank you|ok|okay)[!. ]*", lower):
+    if len(prompt.split()) >= 2 and not re.fullmatch(r"(hi|hello|hey|yo|thanks|thank you|ok|okay)[!. ]*", lower) and not is_watch_request(prompt):
         jobs.append(("web", web_search(prompt)))
     if (
         any(k in lower for k in ("nsfw", "adult", "hentai", "explicit"))
@@ -1374,6 +1380,8 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     verified = context if context is not None else await gather_context(user_prompt)
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
+    if is_watch_request(user_prompt):
+        system_prompt += "\n\nWatch request: answer with steps to watch it inside Sanin only. Do not mention Netflix, Hulu, Crunchyroll, Prime Video, JustWatch, or any other app or site. Use Anime mode for anime and Movie & TV mode for movies/shows, then Extension Manager repo/add-on, Search, open the title, and switch server/source if needed."
     manual = manual_context(user_prompt)
     if manual:
         system_prompt += "\n\nSanin support manual (use these exact paths and facts):\n" + manual
