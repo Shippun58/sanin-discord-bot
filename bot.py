@@ -9,7 +9,7 @@ import logging
 import asyncio
 from pathlib import Path
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import quote, urlparse, parse_qs, unquote, urljoin
 from html import unescape
 from aiohttp import web
@@ -1632,6 +1632,282 @@ class GuideView(discord.ui.View):
         self.add_item(GuideSelect())
 
 # ==========================================
+# OWNER MODERATION
+# ==========================================
+MODERATION_FILE = Path(__file__).with_name("moderation.json")
+MODERATION_LOCK = asyncio.Lock()
+MAX_TIMEOUT_SECONDS = 28 * 24 * 60 * 60
+DURATION_RE = re.compile(r"(\d+)\s*([smhdw])", re.I)
+
+ACTION_TITLES = {
+    "ban": "Ban",
+    "unban": "Unban",
+    "kick": "Kick",
+    "softban": "Softban",
+    "timeout": "Timeout",
+    "untimeout": "Timeout removed",
+    "warn": "Warning",
+    "note": "Moderator note",
+    "clearwarns": "Warnings cleared",
+    "role": "Role update",
+    "nickname": "Nickname update",
+}
+
+ACTION_COLORS = {
+    "ban": discord.Color.red(),
+    "unban": discord.Color.green(),
+    "kick": discord.Color.orange(),
+    "softban": discord.Color.dark_orange(),
+    "timeout": discord.Color.orange(),
+    "untimeout": discord.Color.green(),
+    "warn": discord.Color.gold(),
+    "note": discord.Color.light_grey(),
+    "clearwarns": discord.Color.green(),
+    "role": discord.Color.blue(),
+    "nickname": discord.Color.light_grey(),
+}
+
+MOD_PHRASES = {
+    "ban": (
+        "{user} has been banned. Reason: {reason}. Case {case}. Well, know better next time.",
+        "{user} received a one-way ticket. Reason: {reason}. Do not return on an alt.",
+        "{user} has been escorted out. Reason: {reason}. Case {case}.",
+        "Ban applied to {user}. Reason: {reason}. Moderator: {mod}.",
+    ),
+    "unban": (
+        "{user} has been unbanned. Reason: {reason}. Second chances are finite.",
+        "Unban approved for {user}. Reason: {reason}. Do not make us regret it.",
+    ),
+    "kick": (
+        "{user} has been kicked. Reason: {reason}. Cool off and come back when you can follow the rules.",
+        "{user} was shown the door, not the ban list. Reason: {reason}. Take a break.",
+        "Kicked {user}. Reason: {reason}. Re-entry is allowed; repeat behavior is not.",
+    ),
+    "softban": (
+        "{user} has been softbanned. Reason: {reason}. Messages cleared; re-entry allowed.",
+        "The slate is wiped. {user} was removed and may return. Reason: {reason}.",
+        "Softban applied to {user}. Reason: {reason}. Consider this a warning with cleanup.",
+    ),
+    "timeout": (
+        "{user} is on timeout for {duration}. Reason: {reason}. Use the quiet time to think.",
+        "{user} has been put on ice for {duration}. Reason: {reason}. Thaw out and try again.",
+        "{user} is in the penalty box for {duration}. Reason: {reason}.",
+    ),
+    "untimeout": (
+        "{user} is free to talk again. Reason: {reason}. Keep it civil.",
+        "Timeout lifted for {user}. Reason: {reason}. Do not make this a habit.",
+    ),
+    "warn": (
+        "{user} has been warned. Reason: {reason}. This is warning {count}. This is a notice, not a debate.",
+        "Warning {count} issued to {user}. Reason: {reason}. The next one escalates.",
+        "{user}, consider this a yellow card. Reason: {reason}. Keep it clean.",
+    ),
+    "role": (
+        "Role {role} added to {user}. Reason: {reason}.",
+        "Role {role} removed from {user}. Reason: {reason}.",
+    ),
+    "nickname": (
+        "Nickname updated for {user}. Reason: {reason}.",
+        "Nickname reset for {user}. Reason: {reason}.",
+    ),
+}
+
+def clean_mod_text(value, limit: int = 300) -> str:
+    text = str(value).replace("\n", " ").strip()
+    return discord.utils.escape_markdown(text)[:limit]
+
+def parse_duration(value: str) -> int:
+    raw = value.strip().lower().replace(" ", "")
+    if not raw:
+        raise ValueError("Give a duration like 10m, 2h, or 7d.")
+    if raw.isdigit():
+        seconds = int(raw)
+    elif re.fullmatch(r"(?:\d+[smhdw])+", raw):
+        seconds = sum(int(amount) * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[unit] for amount, unit in DURATION_RE.findall(raw))
+    else:
+        raise ValueError("Use a duration like 30m, 2h, 7d, or 1h30m.")
+    if seconds < 60:
+        raise ValueError("Timeout must be at least 1 minute.")
+    if seconds > MAX_TIMEOUT_SECONDS:
+        raise ValueError("Timeout cannot exceed 28 days.")
+    return seconds
+
+def format_duration(seconds: int) -> str:
+    parts = []
+    for label, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        amount, seconds = divmod(seconds, size)
+        if amount:
+            parts.append(f"{amount}{label}")
+    return " ".join(parts) or "0m"
+
+def load_moderation() -> dict:
+    data = {"next_case": 1, "cases": [], "warnings": {}}
+    try:
+        if MODERATION_FILE.exists():
+            data.update(json.loads(MODERATION_FILE.read_text(encoding="utf-8")))
+    except Exception as e:
+        logging.warning(f"Moderation load failed: {e}")
+    if not isinstance(data.get("cases"), list):
+        data["cases"] = []
+    if not isinstance(data.get("warnings"), dict):
+        data["warnings"] = {}
+    try:
+        data["next_case"] = max(int(data.get("next_case", 1)), max((int(case.get("id", 0)) for case in data["cases"]), default=0) + 1)
+    except Exception:
+        data["next_case"] = 1
+    return data
+
+def save_moderation(data: dict) -> bool:
+    try:
+        temp = MODERATION_FILE.with_suffix(".tmp")
+        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(MODERATION_FILE)
+        return True
+    except Exception as e:
+        logging.warning(f"Moderation save failed: {e}")
+        return False
+
+async def create_case(guild_id: int, action: str, target, reason: str, moderator, duration: str | None = None, warning_add: dict | None = None, warning_clear: bool = False) -> dict:
+    async with MODERATION_LOCK:
+        data = load_moderation()
+        case_id = data["next_case"]
+        data["next_case"] = case_id + 1
+        key = f"{guild_id}:{target.id}"
+        warning_count = len(data["warnings"].get(key, []))
+        cleared = 0
+        if warning_clear:
+            cleared = warning_count
+            data["warnings"].pop(key, None)
+            warning_count = 0
+        if warning_add:
+            warning_add = dict(warning_add)
+            warning_add["case"] = case_id
+            data["warnings"].setdefault(key, []).append(warning_add)
+            data["warnings"][key] = data["warnings"][key][-50:]
+            warning_count = len(data["warnings"][key])
+        entry = {
+            "id": case_id,
+            "guild_id": guild_id,
+            "action": action,
+            "user_id": target.id,
+            "user_name": str(target),
+            "moderator_id": moderator.id,
+            "moderator_name": str(moderator),
+            "reason": reason,
+            "duration": duration,
+            "warning_count": warning_count,
+            "cleared_warnings": cleared,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        data["cases"].append(entry)
+        data["cases"] = data["cases"][-2000:]
+        save_moderation(data)
+        return entry
+
+def get_warnings(guild_id: int, user_id: int) -> list:
+    return load_moderation()["warnings"].get(f"{guild_id}:{user_id}", [])
+
+def get_case(case_id: int) -> dict | None:
+    return next((case for case in load_moderation()["cases"] if case.get("id") == case_id), None)
+
+def get_cases(guild_id: int, user_id: int | None = None, limit: int = 10) -> list:
+    cases = [case for case in load_moderation()["cases"] if case.get("guild_id") == guild_id]
+    if user_id is not None:
+        cases = [case for case in cases if case.get("user_id") == user_id]
+    return cases[-limit:][::-1]
+
+def build_mod_phrase(action: str, **values) -> str:
+    template = random.choice(MOD_PHRASES.get(action, ("{user}: {reason}.",)))
+    return template.format(**values)
+
+def case_embed(case: dict) -> discord.Embed:
+    lines = [
+        f"**User:** {clean_mod_text(case.get('user_name', 'Unknown'))} ({case.get('user_id')})",
+        f"**Moderator:** {clean_mod_text(case.get('moderator_name', 'Unknown'))}",
+        f"**Reason:** {clean_mod_text(case.get('reason', 'No reason given'))}",
+    ]
+    if case.get("duration"):
+        lines.append(f"**Duration:** {case['duration']}")
+    if case.get("warning_count"):
+        lines.append(f"**Warnings:** {case['warning_count']}")
+    if case.get("cleared_warnings"):
+        lines.append(f"**Warnings cleared:** {case['cleared_warnings']}")
+    lines.append(f"**Time:** {case.get('created_at', 'Unknown')}")
+    return discord.Embed(title=f"Case {case.get('id')} - {case.get('action', 'action').title()}", description="\n".join(lines), color=ACTION_COLORS.get(case.get("action"), discord.Color.blurple()))
+
+async def require_owner(interaction: discord.Interaction) -> bool:
+    if not is_owner(interaction.user):
+        await interaction.response.send_message("Owner only.", ephemeral=True)
+        return False
+    if interaction.guild is None:
+        await interaction.response.send_message("Use this in a server.", ephemeral=True)
+        return False
+    return True
+
+def hierarchy_problem(interaction: discord.Interaction, target) -> str | None:
+    guild = interaction.guild
+    if target.id == guild.owner_id:
+        return "I cannot action the server owner."
+    if target.id == guild.me.id:
+        return "I cannot action myself."
+    if guild.me.top_role <= target.top_role:
+        return "My role is not above that user."
+    return None
+
+def missing_bot_permission(interaction: discord.Interaction, permission: str) -> str | None:
+    if not getattr(interaction.guild.me.guild_permissions, permission, False):
+        return f"I need the {permission.replace('_', ' ')} permission."
+    return None
+
+async def send_case_log(interaction: discord.Interaction, case: dict):
+    channel_id = os.getenv("MODLOG_CHANNEL_ID", "").strip()
+    if not channel_id.isdigit():
+        return
+    channel = interaction.guild.get_channel(int(channel_id))
+    if channel is None:
+        return
+    try:
+        await channel.send(embed=case_embed(case))
+    except Exception as e:
+        logging.warning(f"Modlog send failed: {e}")
+
+async def publish_moderation(interaction: discord.Interaction, action: str, target, reason: str, case: dict, channel, duration: str | None = None, role=None, nickname=None, phrase: str | None = None) -> str | None:
+    values = {
+        "user": clean_mod_text(target.display_name if hasattr(target, "display_name") else target.name),
+        "reason": clean_mod_text(reason),
+        "case": case["id"],
+        "mod": clean_mod_text(interaction.user.display_name),
+        "duration": duration or "",
+        "count": case.get("warning_count", 0),
+        "role": clean_mod_text(role.name if role else ""),
+        "nickname": clean_mod_text(nickname or ""),
+    }
+    text = phrase or build_mod_phrase(action, **values)
+    embed = discord.Embed(title=ACTION_TITLES.get(action, action.title()), description=text, color=ACTION_COLORS.get(action, discord.Color.blurple()), timestamp=discord.utils.utcnow())
+    embed.set_footer(text=f"Sanin moderation - Case {case['id']}")
+    try:
+        sent = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        return sent.jump_url
+    except Exception as e:
+        logging.warning(f"Moderation message failed: {e}")
+        return None
+
+async def ensure_bot_permission(interaction: discord.Interaction, permission: str):
+    problem = missing_bot_permission(interaction, permission)
+    if problem:
+        await interaction.followup.send(problem, ephemeral=True)
+        return False
+    return True
+
+async def report_mod_error(interaction: discord.Interaction, error: Exception):
+    logging.warning(f"Moderation action failed: {error}")
+    if isinstance(error, discord.Forbidden):
+        text = "Discord blocked that action. Check my permissions and role order."
+    else:
+        text = "That action failed. Check the user, permissions, and role order."
+    await interaction.followup.send(text, ephemeral=True)
+
+# ==========================================
 # DISCORD EVENTS
 # ==========================================
 @bot.event
@@ -2016,6 +2292,388 @@ async def tone_slash(interaction: discord.Interaction, description: str, user: d
         await interaction.followup.send(f"Saved style for {target.display_name}.", ephemeral=True)
     else:
         await interaction.followup.send("Couldn't save that right now.", ephemeral=True)
+
+@bot.tree.command(name="ban", description="Ban a member (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="Member to ban", reason="Reason for the ban", delete_days="Days of recent messages to delete", channel="Where to post the public notice")
+async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: str, delete_days: app_commands.Range[int, 0, 7] = 0, channel: discord.TextChannel | None = None):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    if not await ensure_bot_permission(interaction, "ban_members"):
+        return
+    problem = hierarchy_problem(interaction, member)
+    if problem:
+        await interaction.followup.send(problem, ephemeral=True)
+        return
+    try:
+        await interaction.guild.ban(member, reason=f"{reason} | by {interaction.user}", delete_message_seconds=delete_days * 86400)
+    except Exception as e:
+        await report_mod_error(interaction, e)
+        return
+    case = await create_case(interaction.guild.id, "ban", member, reason, interaction.user)
+    url = await publish_moderation(interaction, "ban", member, reason, case, channel or interaction.channel)
+    await send_case_log(interaction, case)
+    text = f"Banned {member.mention}. Case {case['id']}."
+    if url:
+        text += f" Notice: {url}"
+    await interaction.followup.send(text, ephemeral=True)
+
+@bot.tree.command(name="unban", description="Unban a user (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="User to unban", reason="Reason for the unban", channel="Where to post the public notice")
+async def unban_slash(interaction: discord.Interaction, user: discord.User, reason: str, channel: discord.TextChannel | None = None):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    if not await ensure_bot_permission(interaction, "ban_members"):
+        return
+    try:
+        await interaction.guild.fetch_ban(user)
+    except discord.NotFound:
+        await interaction.followup.send("That user is not banned.", ephemeral=True)
+        return
+    except Exception as e:
+        await report_mod_error(interaction, e)
+        return
+    try:
+        await interaction.guild.unban(user, reason=f"{reason} | by {interaction.user}")
+    except Exception as e:
+        await report_mod_error(interaction, e)
+        return
+    case = await create_case(interaction.guild.id, "unban", user, reason, interaction.user)
+    url = await publish_moderation(interaction, "unban", user, reason, case, channel or interaction.channel)
+    await send_case_log(interaction, case)
+    text = f"Unbanned {user.mention}. Case {case['id']}."
+    if url:
+        text += f" Notice: {url}"
+    await interaction.followup.send(text, ephemeral=True)
+
+@bot.tree.command(name="kick", description="Kick a member (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="Member to kick", reason="Reason for the kick", channel="Where to post the public notice")
+async def kick_slash(interaction: discord.Interaction, member: discord.Member, reason: str, channel: discord.TextChannel | None = None):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    if not await ensure_bot_permission(interaction, "kick_members"):
+        return
+    problem = hierarchy_problem(interaction, member)
+    if problem:
+        await interaction.followup.send(problem, ephemeral=True)
+        return
+    try:
+        await member.kick(reason=f"{reason} | by {interaction.user}")
+    except Exception as e:
+        await report_mod_error(interaction, e)
+        return
+    case = await create_case(interaction.guild.id, "kick", member, reason, interaction.user)
+    url = await publish_moderation(interaction, "kick", member, reason, case, channel or interaction.channel)
+    await send_case_log(interaction, case)
+    text = f"Kicked {member.mention}. Case {case['id']}."
+    if url:
+        text += f" Notice: {url}"
+    await interaction.followup.send(text, ephemeral=True)
+
+@bot.tree.command(name="softban", description="Ban, clear recent messages, then unban (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="Member to softban", reason="Reason for the softban", delete_days="Days of recent messages to delete", channel="Where to post the public notice")
+async def softban_slash(interaction: discord.Interaction, member: discord.Member, reason: str, delete_days: app_commands.Range[int, 0, 7] = 1, channel: discord.TextChannel | None = None):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    if not await ensure_bot_permission(interaction, "ban_members"):
+        return
+    problem = hierarchy_problem(interaction, member)
+    if problem:
+        await interaction.followup.send(problem, ephemeral=True)
+        return
+    banned = False
+    try:
+        await interaction.guild.ban(member, reason=f"Softban: {reason} | by {interaction.user}", delete_message_seconds=delete_days * 86400)
+        banned = True
+        await interaction.guild.unban(member, reason=f"Softban unban: {reason} | by {interaction.user}")
+    except Exception as e:
+        if banned:
+            logging.warning(f"Softban unban failed: {e}")
+            await interaction.followup.send("The user is still banned because the unban step failed. Use /unban.", ephemeral=True)
+        else:
+            await report_mod_error(interaction, e)
+        return
+    case = await create_case(interaction.guild.id, "softban", member, reason, interaction.user)
+    url = await publish_moderation(interaction, "softban", member, reason, case, channel or interaction.channel)
+    await send_case_log(interaction, case)
+    text = f"Softbanned {member.mention}. Case {case['id']}."
+    if url:
+        text += f" Notice: {url}"
+    await interaction.followup.send(text, ephemeral=True)
+
+@bot.tree.command(name="timeout", description="Timeout a member (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="Member to timeout", reason="Reason for the timeout", duration="Duration such as 10m, 2h, 7d, or 1h30m", channel="Where to post the public notice")
+async def timeout_slash(interaction: discord.Interaction, member: discord.Member, reason: str, duration: str = "10m", channel: discord.TextChannel | None = None):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    if not await ensure_bot_permission(interaction, "moderate_members"):
+        return
+    problem = hierarchy_problem(interaction, member)
+    if problem:
+        await interaction.followup.send(problem, ephemeral=True)
+        return
+    try:
+        seconds = parse_duration(duration)
+    except ValueError as e:
+        await interaction.followup.send(str(e), ephemeral=True)
+        return
+    label = format_duration(seconds)
+    try:
+        await member.timeout(datetime.now(timezone.utc) + timedelta(seconds=seconds), reason=f"{reason} | by {interaction.user}")
+    except Exception as e:
+        await report_mod_error(interaction, e)
+        return
+    case = await create_case(interaction.guild.id, "timeout", member, reason, interaction.user, duration=label)
+    url = await publish_moderation(interaction, "timeout", member, reason, case, channel or interaction.channel, duration=label)
+    await send_case_log(interaction, case)
+    text = f"Timed out {member.mention} for {label}. Case {case['id']}."
+    if url:
+        text += f" Notice: {url}"
+    await interaction.followup.send(text, ephemeral=True)
+
+@bot.tree.command(name="untimeout", description="Remove a timeout (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="Member to restore", reason="Reason for removing the timeout", channel="Where to post the public notice")
+async def untimeout_slash(interaction: discord.Interaction, member: discord.Member, reason: str, channel: discord.TextChannel | None = None):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    if not await ensure_bot_permission(interaction, "moderate_members"):
+        return
+    if not member.is_timed_out():
+        await interaction.followup.send("That user is not timed out.", ephemeral=True)
+        return
+    try:
+        await member.timeout(None, reason=f"{reason} | by {interaction.user}")
+    except Exception as e:
+        await report_mod_error(interaction, e)
+        return
+    case = await create_case(interaction.guild.id, "untimeout", member, reason, interaction.user)
+    url = await publish_moderation(interaction, "untimeout", member, reason, case, channel or interaction.channel)
+    await send_case_log(interaction, case)
+    text = f"Removed timeout from {member.mention}. Case {case['id']}."
+    if url:
+        text += f" Notice: {url}"
+    await interaction.followup.send(text, ephemeral=True)
+
+@bot.tree.command(name="warn", description="Warn a member (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="Member to warn", reason="Reason for the warning", channel="Where to post the public notice")
+async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str, channel: discord.TextChannel | None = None):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    warning = {"reason": reason, "at": datetime.now(timezone.utc).isoformat(), "moderator_id": interaction.user.id}
+    case = await create_case(interaction.guild.id, "warn", member, reason, interaction.user, warning_add=warning)
+    url = await publish_moderation(interaction, "warn", member, reason, case, channel or interaction.channel)
+    await send_case_log(interaction, case)
+    text = f"Warned {member.mention}. Warning {case['warning_count']}. Case {case['id']}."
+    if url:
+        text += f" Notice: {url}"
+    await interaction.followup.send(text, ephemeral=True)
+
+@bot.tree.command(name="warnings", description="Show a user's warnings (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="User to check")
+async def warnings_slash(interaction: discord.Interaction, user: discord.User):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    warnings = get_warnings(interaction.guild.id, user.id)
+    if not warnings:
+        await interaction.followup.send(f"{user.mention} has no warnings.", ephemeral=True)
+        return
+    lines = [f"**{getattr(user, 'display_name', str(user))}** has {len(warnings)} warning(s)."]
+    for item in warnings[-10:]:
+        lines.append(f"Case {item.get('case')}: {clean_mod_text(item.get('reason', 'No reason'))}")
+    await interaction.followup.send(embed=discord.Embed(title="Warnings", description=fit_text("\n".join(lines), 4000), color=discord.Color.gold()), ephemeral=True)
+
+@bot.tree.command(name="clearwarns", description="Clear a user's warnings (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="User whose warnings should be cleared", reason="Reason for clearing them")
+async def clearwarns_slash(interaction: discord.Interaction, user: discord.User, reason: str):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    if not get_warnings(interaction.guild.id, user.id):
+        await interaction.followup.send(f"{user.mention} has no warnings.", ephemeral=True)
+        return
+    case = await create_case(interaction.guild.id, "clearwarns", user, reason, interaction.user, warning_clear=True)
+    await send_case_log(interaction, case)
+    await interaction.followup.send(f"Cleared {case['cleared_warnings']} warning(s) for {user.mention}. Case {case['id']}.", ephemeral=True)
+
+@bot.tree.command(name="note", description="Add a moderator note (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="User to note", note="What should be recorded")
+async def note_slash(interaction: discord.Interaction, user: discord.User, note: str):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    note = note.strip()
+    if not note:
+        await interaction.followup.send("Give me a note.", ephemeral=True)
+        return
+    case = await create_case(interaction.guild.id, "note", user, note, interaction.user)
+    await send_case_log(interaction, case)
+    await interaction.followup.send(f"Note saved for {user.mention}. Case {case['id']}.", ephemeral=True)
+
+@bot.tree.command(name="case", description="Show a moderation case (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(case_id="Case number")
+async def case_slash(interaction: discord.Interaction, case_id: int):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    case = get_case(case_id)
+    if not case or case.get("guild_id") != interaction.guild.id:
+        await interaction.followup.send("Case not found in this server.", ephemeral=True)
+        return
+    await interaction.followup.send(embed=case_embed(case), ephemeral=True)
+
+@bot.tree.command(name="modlog", description="Show recent moderation cases (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="Filter by user", limit="Number of cases to show")
+async def modlog_slash(interaction: discord.Interaction, user: discord.User | None = None, limit: app_commands.Range[int, 1, 25] = 10):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    cases = get_cases(interaction.guild.id, user.id if user else None, limit)
+    if not cases:
+        await interaction.followup.send("No cases found.", ephemeral=True)
+        return
+    lines = []
+    for case in cases:
+        lines.append(f"Case {case['id']} - {case.get('action', 'action').title()}: {clean_mod_text(case.get('user_name', 'Unknown'))} - {clean_mod_text(case.get('reason', 'No reason'))}")
+    await interaction.followup.send(embed=discord.Embed(title="Moderation log", description=fit_text("\n".join(lines), 4000), color=discord.Color.blurple()), ephemeral=True)
+
+@bot.tree.command(name="role", description="Add or remove a role (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="Member to update", role="Role to add or remove", action="Add or remove the role", reason="Reason for the change", channel="Where to post the public notice")
+@app_commands.choices(action=[app_commands.Choice(name="Add", value="add"), app_commands.Choice(name="Remove", value="remove")])
+async def role_slash(interaction: discord.Interaction, member: discord.Member, role: discord.Role, action: app_commands.Choice[str], reason: str, channel: discord.TextChannel | None = None):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    if not await ensure_bot_permission(interaction, "manage_roles"):
+        return
+    problem = hierarchy_problem(interaction, member)
+    if problem:
+        await interaction.followup.send(problem, ephemeral=True)
+        return
+    if role.is_default() or role.managed or interaction.guild.me.top_role <= role:
+        await interaction.followup.send("That role cannot be assigned by me.", ephemeral=True)
+        return
+    try:
+        if action.value == "add":
+            await member.add_roles(role, reason=f"{reason} | by {interaction.user}")
+            phrase = f"Role {clean_mod_text(role.name)} added to {clean_mod_text(member.display_name)}. Reason: {clean_mod_text(reason)}."
+        else:
+            await member.remove_roles(role, reason=f"{reason} | by {interaction.user}")
+            phrase = f"Role {clean_mod_text(role.name)} removed from {clean_mod_text(member.display_name)}. Reason: {clean_mod_text(reason)}."
+    except Exception as e:
+        await report_mod_error(interaction, e)
+        return
+    case = await create_case(interaction.guild.id, "role", member, reason, interaction.user)
+    url = await publish_moderation(interaction, "role", member, reason, case, channel or interaction.channel, role=role, phrase=phrase)
+    await send_case_log(interaction, case)
+    text = f"Updated roles for {member.mention}. Case {case['id']}."
+    if url:
+        text += f" Notice: {url}"
+    await interaction.followup.send(text, ephemeral=True)
+
+@bot.tree.command(name="nickname", description="Change or reset a nickname (owner only)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="Member to update", reason="Reason for the change", nickname="New nickname; leave blank to reset", channel="Where to post the public notice")
+async def nickname_slash(interaction: discord.Interaction, member: discord.Member, reason: str, nickname: str | None = None, channel: discord.TextChannel | None = None):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    reason = reason.strip()
+    if not reason:
+        await interaction.followup.send("Give a reason.", ephemeral=True)
+        return
+    if not await ensure_bot_permission(interaction, "manage_nicknames"):
+        return
+    problem = hierarchy_problem(interaction, member)
+    if problem:
+        await interaction.followup.send(problem, ephemeral=True)
+        return
+    new_nick = nickname.strip() if nickname else member.name
+    if len(new_nick) > 32:
+        await interaction.followup.send("Nicknames are limited to 32 characters.", ephemeral=True)
+        return
+    try:
+        await member.edit(nick=new_nick, reason=f"{reason} | by {interaction.user}")
+    except Exception as e:
+        await report_mod_error(interaction, e)
+        return
+    case = await create_case(interaction.guild.id, "nickname", member, reason, interaction.user)
+    phrase = f"Nickname {'reset' if not nickname else 'updated'} for {clean_mod_text(member.display_name)}. Reason: {clean_mod_text(reason)}."
+    url = await publish_moderation(interaction, "nickname", member, reason, case, channel or interaction.channel, nickname=new_nick, phrase=phrase)
+    await send_case_log(interaction, case)
+    text = f"Updated nickname for {member.mention}. Case {case['id']}."
+    if url:
+        text += f" Notice: {url}"
+    await interaction.followup.send(text, ephemeral=True)
 
 # ==========================================
 # HEALTH-CHECK WEB SERVER
