@@ -1001,6 +1001,22 @@ async def web_search(query: str) -> list:
                 errors.append(str(e)[:80])
     raise Exception("search " + ", ".join(errors))
 
+def clean_plugin_name(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if text.startswith("{") or text.startswith("["):
+        return ""
+    if len(text) > 60 or any(char in text for char in ("'", "{", "}", "Federative Repub")):
+        return ""
+    return text
+
+def looks_like_extension_manifest(data, url: str) -> bool:
+    haystack = url.lower()
+    if isinstance(data, dict):
+        haystack += " " + " ".join(str(key) for key in list(data.keys())[:30])
+    return any(marker in haystack for marker in ("cloudstream", "cloud-stream", "aniyomi", "anikku", "extension", "plugin", "repo", "stremio"))
+
 def is_public_repo_url(url: str) -> bool:
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -1028,6 +1044,9 @@ async def inspect_repo(url: str) -> dict:
         data = await fetch_json(url, headers=WEB_HEADERS, timeout=20)
     except Exception as e:
         result["error"] = str(e)[:120]
+        return result
+    if not looks_like_extension_manifest(data, url):
+        result["error"] = "not an extension manifest"
         return result
     items = data if isinstance(data, list) else None
     if isinstance(data, dict):
@@ -1057,8 +1076,11 @@ async def inspect_repo(url: str) -> dict:
     for item in items:
         if not isinstance(item, dict):
             continue
+        name = clean_plugin_name(item.get("name") or item.get("internalName") or item.get("pkg") or item.get("id"))
+        if not name:
+            continue
         plugins.append({
-            "name": str(item.get("name") or item.get("internalName") or item.get("pkg") or item.get("id") or "unnamed")[:50],
+            "name": name,
             "description": str(item.get("description") or "")[:300],
             "language": str(item.get("language") or ""),
             "tvTypes": " ".join(str(t) for t in item.get("tvTypes", []) if t) if isinstance(item.get("tvTypes"), list) else "",
@@ -1704,7 +1726,14 @@ def plugin_name_matches(name: str, want: str) -> bool:
     return bool(wanted) and (wanted == available or available.startswith(wanted) or available.endswith(wanted))
 
 def pick_plugin_names(plugins: list, prompt: str, preferred: list | None = None) -> list:
-    records = [plugin if isinstance(plugin, dict) else {"name": str(plugin)} for plugin in plugins]
+    raw_records = [plugin if isinstance(plugin, dict) else {"name": str(plugin)} for plugin in plugins]
+    records = []
+    for record in raw_records:
+        name = clean_plugin_name(record.get("name", ""))
+        if name:
+            record = dict(record)
+            record["name"] = name
+            records.append(record)
     if no_torrents_requested(prompt):
         records = [record for record in records if not looks_like_torrent(plugin_text(record))]
     if preferred:
@@ -1757,10 +1786,10 @@ def fallback_plugin_names(check: dict, prompt: str, limit: int = 4) -> list:
     names = []
     for record in records:
         if isinstance(record, dict):
-            name = str(record.get("name", ""))
+            name = clean_plugin_name(record.get("name", ""))
             text = plugin_text(record)
         else:
-            name = str(record)
+            name = clean_plugin_name(record)
             text = str(record)
         if not name or (skip_torrents and looks_like_torrent(text)):
             continue
