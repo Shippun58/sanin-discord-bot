@@ -2719,6 +2719,15 @@ async def on_ready():
         except Exception as e:
             logging.error(f"Failed to sync to guild {guild.name}: {e}")
 
+@bot.event
+async def on_guild_join(guild):
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        logging.info(f"⚡ Synced {len(synced)} slash commands to new guild: {guild.name}")
+    except Exception as e:
+        logging.error(f"Failed to sync to new guild {guild.name}: {e}")
+
 async def fetch_channel_context(channel, current_message, limit: int = 8) -> str:
     lines = []
     try:
