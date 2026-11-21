@@ -72,9 +72,7 @@ SANIN_SYSTEM_PROMPT = """You are San, a helper in the Sanin Discord.
 Identity
 - Sanin is an open-source media player and tracker for Android phones, tablets, Android TV, and Fire TV.
 - If someone asks who made you, answer in one plain sentence: built around Sanin by its developers and open-source contributors. No speech, no mascot intro.
-- Official repo: https://github.com/Nashon-ops/Sanin
-- Official releases: https://github.com/Nashon-ops/Sanin/releases
-- Only include those two links when the user explicitly asks for the repo, source code, GitHub, release page, download link, or latest version. Never attach them to normal answers and never repeat a refusal policy.
+- Never write, guess, or paste the official repo or release URLs yourself. The runtime supplies them only when the user explicitly asks for the repo, source code, GitHub, release page, download link, or latest version. Never attach them to normal answers and never repeat a refusal policy.
 - Extension repositories are different: use Wotaku, live search results, and owner notes. Do not confuse them with the Sanin app repo.
 - For every other topic, do not bring up Sanin or its links at all.
 
@@ -89,6 +87,9 @@ Sanin support
 - If someone only says they are stuck, lost, or something is not working, ask one short question about the exact screen, error, or mode. Do not dump the manual or list every possible fix.
 - Use the support manual only when it directly matches the reported issue. Never paste or summarize whole manual sections.
 - Match the user's language; if the user writes in Spanish, reply in Spanish. Do not translate into English unless the user asked for English.
+- In general discussion about anime, manga, characters, or news, just talk about the topic. Do not pivot to Sanin, app features, setup, or what Sanin tracks unless they ask.
+- If they ask about manga, answer the manga question; only mention Sanin's library support if they ask whether Sanin tracks or reads manga.
+- Use recent messages and remembered details to continue the same conversation naturally. Do not restart the discussion or answer a generic support question.
 - Adult/NSFW content is supported by Sanin when enabled. If asked how to enable it or why it is hidden, give the exact toggles from the manual. Do not refuse, moralize, or pretend the feature does not exist.
 - For adult title recommendations, give a short list of titles that fit the request and label them NSFW. Use AniList adult anime data for anime and live results for movies/TV. Keep descriptions non-explicit; no graphic sexual detail.
 - For NSFW repos or plugins, use the same repo search and verification flow. List plugin names only when they came from the verified manifest.
@@ -137,7 +138,7 @@ def wants_sanin_links(prompt: str) -> bool:
     terms = ("repo", "repository", "source code", "source", "github", "releases", "release page", "download", "apk", "latest version")
     if "sanin" in lower and any(term in lower for term in terms):
         return True
-    if re.search(r"\b(your|you|ur)\b", lower) and any(term in lower for term in terms):
+    if re.search(r"\b(your|ur)\b", lower) and any(term in lower for term in terms):
         return True
     if any(phrase in lower for phrase in ("the app repo", "this app repo", "app source", "app github")):
         return True
@@ -1486,7 +1487,7 @@ async def on_message(message: discord.Message):
         if not clean:
             clean = "Hello!"
         if reply_context:
-            clean = f"Replying to your previous message '{reply_context}'. Follow-up: {clean}"
+            clean = f"Previous message: '{reply_context}'. Follow-up: {clean}"
         fact = extract_user_fact(message.clean_content)
         if fact:
             await remember_user(message.author, fact)
@@ -1495,13 +1496,13 @@ async def on_message(message: discord.Message):
             await remember_tone(message.author, tone)
 
         async def status():
-            await message.reply(random.choice(WAIT_LINES))
+            await message.channel.send(random.choice(WAIT_LINES))
 
         async with message.channel.typing():
             reply_text = await get_ai_response(message.channel.id, message.author.display_name, clean, user_id=message.author.id, status=status)
             chunks = split_message(reply_text)
             if chunks:
-                await message.reply(chunks[0])
+                await message.channel.send(chunks[0])
                 for chunk in chunks[1:]:
                     await message.channel.send(chunk)
         return
