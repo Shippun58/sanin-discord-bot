@@ -1873,6 +1873,108 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
         lines.append("I couldn't verify a working repo from those results. Check the search links manually before relying on one.")
     return "\n".join(lines)
 
+async def github_code_manifest_urls(query: str, limit: int = 5) -> list[str]:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.github.com/search/code",
+                params={"q": query, "per_page": min(limit, 10)},
+                headers=github_headers(),
+                timeout=aiohttp.ClientTimeout(total=12),
+            ) as resp:
+                if resp.status != 200:
+                    logging.warning(f"GitHub code search failed ({resp.status}): {query}")
+                    return []
+                data = await resp.json()
+    except Exception as e:
+        logging.warning(f"GitHub code search failed: {str(e)[:100]}")
+        return []
+    urls = []
+    for item in data.get("items", []):
+        html = str(item.get("html_url") or "")
+        if "/blob/" not in html:
+            continue
+        raw = html.replace("https://github.com/", "https://raw.githubusercontent.com/").replace("/blob/", "/")
+        if raw not in urls:
+            urls.append(raw)
+    return urls[:limit]
+
+async def github_repo_manifest_urls(query: str, limit: int = 3) -> list[str]:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.github.com/search/repositories",
+                params={"q": query, "per_page": limit, "sort": "updated", "order": "desc"},
+                headers=github_headers(),
+                timeout=aiohttp.ClientTimeout(total=12),
+            ) as resp:
+                if resp.status != 200:
+                    logging.warning(f"GitHub repo search failed ({resp.status}): {query}")
+                    return []
+                data = await resp.json()
+            urls = []
+            for repo in data.get("items", [])[:limit]:
+                full_name = str(repo.get("full_name") or "")
+                branch = str(repo.get("default_branch") or "main")
+                if not full_name:
+                    continue
+                async with session.get(
+                    f"https://api.github.com/repos/{full_name}/contents",
+                    params={"ref": branch},
+                    headers=github_headers(),
+                    timeout=aiohttp.ClientTimeout(total=12),
+                ) as contents_resp:
+                    if contents_resp.status != 200:
+                        continue
+                    entries = await contents_resp.json()
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    name = str(entry.get("name") or "")
+                    path = str(entry.get("path") or "")
+                    if not name.lower().endswith(".json") or not path:
+                        continue
+                    if any(skip in name.lower() for skip in ("package", "package-lock", "tsconfig")):
+                        continue
+                    if not any(key in name.lower() for key in ("repo", "index", "plugin", "extension", "cloudstream", "aniyomi")):
+                        continue
+                    raw = f"https://raw.githubusercontent.com/{full_name}/{branch}/{quote(path)}"
+                    if raw not in urls:
+                        urls.append(raw)
+            return urls[:limit]
+    except Exception as e:
+        logging.warning(f"GitHub repo search failed: {str(e)[:100]}")
+        return []
+
+async def github_manifest_search(prompt: str, lang: str = "", mode: str = "") -> list[str]:
+    if not lang:
+        return []
+    aliases = REPO_LANGUAGE_ALIASES.get(lang.lower(), (lang.lower(),))
+    lang_query = aliases[0]
+    if mode == "aniyomi":
+        extensions = ["aniyomi"]
+    elif mode == "both":
+        extensions = ["cloudstream", "aniyomi"]
+    else:
+        extensions = ["cloudstream"]
+    urls = []
+    for extension in extensions:
+        found = []
+        for query in (
+            f"{lang_query} {extension} filename:repo.json",
+            f"{lang_query} {extension} filename:index.min.json",
+        ):
+            found.extend(await github_code_manifest_urls(query))
+            if found:
+                break
+        found.extend(await github_repo_manifest_urls(f"{lang_query} {extension} extension repo"))
+        for url in found:
+            if url not in urls:
+                urls.append(url)
+        if len(urls) >= 8:
+            break
+    return urls[:8]
+
 async def repo_recommendation(prompt: str, facts: list | None = None) -> str | None:
     if not asks_extension_repo(prompt):
         return None
@@ -1913,6 +2015,7 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
     results = await asyncio.gather(
         *(web_search(query) for query in queries),
         wotaku_repos(lower),
+        github_manifest_search(prompt, lang, mode),
         return_exceptions=True,
     )
 
@@ -1934,6 +2037,9 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
             add_urls(result)
         elif isinstance(result, list):
             for item in result:
+                if isinstance(item, str):
+                    add_urls(item)
+                    continue
                 if not isinstance(item, dict):
                     continue
                 add_urls(item.get("snippet", ""))
