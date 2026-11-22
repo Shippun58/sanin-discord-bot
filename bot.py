@@ -1046,7 +1046,7 @@ def is_public_repo_url(url: str) -> bool:
 
 async def inspect_repo(url: str) -> dict:
     url = url.strip().rstrip(".,;")
-    result = {"url": url, "ok": False, "count": 0, "valid_urls": 0, "names": [], "sample": "", "error": ""}
+    result = {"url": url, "ok": False, "count": 0, "valid_urls": 0, "names": [], "sample": "", "error": "", "repo_name": "", "repo_description": ""}
     if not is_public_repo_url(url):
         result["error"] = "not a public http(s) URL"
         return result
@@ -1060,6 +1060,8 @@ async def inspect_repo(url: str) -> dict:
         return result
     items = data if isinstance(data, list) else None
     if isinstance(data, dict):
+        result["repo_name"] = str(data.get("name") or "")[:120]
+        result["repo_description"] = str(data.get("description") or "")[:300]
         for key in ("plugins", "extensions", "items", "data"):
             if isinstance(data.get(key), list):
                 items = data[key]
@@ -1588,6 +1590,58 @@ def plugin_text(plugin) -> str:
         return plugin
     return " ".join(str(plugin.get(key, "")) for key in ("name", "description", "language", "tvTypes"))
 
+ANIME_CONTENT_TERMS = ("anime", "aniworld", "animebase", "animetoast", "animestream", "aniyomi", "otaku", "manga")
+MOVIE_TV_CONTENT_TERMS = ("movie", "movies", "film", "films", "cinema", "kino", "kinofilme", "tv", "show", "shows", "series", "serie", "serien", "episodes", "episodic", "vod")
+
+def plugin_content_kind(plugin) -> str:
+    if isinstance(plugin, dict):
+        text = plugin_text(plugin).lower()
+        tv_types = str(plugin.get("tvTypes") or "").lower()
+    else:
+        text = str(plugin or "").lower()
+        tv_types = ""
+    haystack = f"{text} {tv_types}"
+    if "anime" in tv_types or any(term in haystack for term in ANIME_CONTENT_TERMS):
+        return "anime"
+    if any(term in tv_types for term in ("movie", "film", "tv", "series", "show")):
+        return "movie_tv"
+    if any(term in haystack for term in MOVIE_TV_CONTENT_TERMS):
+        return "movie_tv"
+    return "unknown"
+
+def repo_content_kind(check: dict) -> str:
+    repo_text = f"{check.get('repo_name', '')} {check.get('repo_description', '')}".lower()
+    if any(term in repo_text for term in ("anime", "aniyomi", "otaku", "manga")):
+        return "anime"
+    if any(term in repo_text for term in ("movie", "movies", "film", "films", "cinema")) or re.search(r"\btv\b", repo_text):
+        return "movie_tv"
+    kinds = [plugin_content_kind(plugin) for plugin in (check.get("plugins") or [])]
+    anime = sum(1 for kind in kinds if kind == "anime")
+    movie_tv = sum(1 for kind in kinds if kind == "movie_tv")
+    if anime and not movie_tv:
+        return "anime"
+    if movie_tv and not anime:
+        return "movie_tv"
+    if anime and movie_tv:
+        return "mixed"
+    return "unknown"
+
+def content_rank(check: dict, mode: str) -> int:
+    kind = repo_content_kind(check)
+    if mode in ("movie", "cloudstream"):
+        if kind == "movie_tv":
+            return 0
+        if kind == "anime":
+            return 2
+        return 1
+    if mode == "aniyomi":
+        if kind == "anime":
+            return 0
+        if kind == "movie_tv":
+            return 2
+        return 1
+    return 0
+
 def plugin_score(plugin, prompt: str) -> int:
     lower = prompt.lower()
     text = plugin_text(plugin).lower()
@@ -1763,6 +1817,15 @@ def pick_plugin_names(plugins: list, prompt: str, preferred: list | None = None)
                         chosen.append(name)
                     break
         return chosen[:6]
+    mode = repo_mode(prompt)
+    if mode in ("movie", "cloudstream"):
+        filtered = [record for record in records if plugin_content_kind(record) != "anime"]
+    elif mode == "aniyomi":
+        filtered = [record for record in records if plugin_content_kind(record) != "movie_tv"]
+    else:
+        filtered = records
+    if filtered:
+        records = filtered
     scored = sorted(((plugin_score(record, prompt), record.get("name", "")) for record in records), key=lambda item: -item[0])
     matches = []
     for score, name in scored:
@@ -1770,7 +1833,7 @@ def pick_plugin_names(plugins: list, prompt: str, preferred: list | None = None)
             matches.append(name)
     return matches[:4]
 
-def repo_content_label(prompt: str, mode: str, lang: str = "") -> str:
+def repo_content_label(prompt: str, mode: str, lang: str = "", kind: str = "") -> str:
     lower = prompt.lower()
     bits = []
     if lang:
@@ -1781,7 +1844,13 @@ def repo_content_label(prompt: str, mode: str, lang: str = "") -> str:
         bits.append("4K")
     if any(k in lower for k in ("live", "sport", "sports", "match", "iptv", "channel")):
         bits.append("Live TV/sports")
-    if any(k in lower for k in ("anime", "aniyomi", "manga")):
+    if kind == "anime":
+        bits.append("Anime")
+    elif kind == "movie_tv":
+        bits.append("Movie & TV")
+    elif kind == "mixed":
+        bits.append("Anime + Movie & TV")
+    elif any(k in lower for k in ("anime", "aniyomi", "manga")):
         bits.append("Anime")
     elif any(k in lower for k in ("movie", "movies", "tv", "show", "shows", "series")):
         bits.append("Movie & TV")
@@ -1794,12 +1863,18 @@ def check_language_match(check: dict, lang: str) -> bool:
         return False
     aliases = REPO_LANGUAGE_ALIASES.get(lang.lower(), (lang.lower(),))
     plugins = check.get("plugins") or check.get("names") or []
-    haystack = check.get("url", "") + " " + " ".join(plugin_text(item) for item in plugins[:40])
+    haystack = " ".join((
+        check.get("url", ""),
+        check.get("repo_name", ""),
+        check.get("repo_description", ""),
+        " ".join(plugin_text(item) for item in plugins[:40]),
+    ))
     return any(re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", haystack, re.I) for alias in aliases)
 
 def fallback_plugin_names(check: dict, prompt: str, limit: int = 4) -> list:
     records = check.get("plugins") or check.get("names") or []
     skip_torrents = no_torrents_requested(prompt)
+    mode = repo_mode(prompt)
     names = []
     for record in records:
         if isinstance(record, dict):
@@ -1808,6 +1883,11 @@ def fallback_plugin_names(check: dict, prompt: str, limit: int = 4) -> list:
         else:
             name = clean_plugin_name(record)
             text = str(record)
+        kind = plugin_content_kind(record)
+        if mode in ("movie", "cloudstream") and kind == "anime":
+            continue
+        if mode == "aniyomi" and kind == "movie_tv":
+            continue
         if not name or (skip_torrents and looks_like_torrent(text)):
             continue
         if name not in names:
@@ -1845,6 +1925,7 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
     if verified:
         verified.sort(key=lambda check: (
             0 if lang and check_language_match(check, lang) else (1 if lang else 0),
+            content_rank(check, mode),
             named_rank(check),
             -best_plugin_score(check, prompt),
             repo_rank(check),
@@ -1853,12 +1934,20 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
     lines = []
     if verified:
         first = verified[0]
-        label = repo_content_label(prompt, mode, lang)
+        kind = repo_content_kind(first)
+        label = repo_content_label(prompt, mode, lang, kind)
         lines.append(f"Verified {label} repo: {first['url']}")
         lines.append(f"{first['count']} entries checked.")
         names = pick_plugin_names(first.get("plugins") or first.get("names", []), prompt, preferred)
         if not names and any(k in prompt_lower for k in ("plugin", "plugins", "extension", "extensions")) and not preferred:
             names = fallback_plugin_names(first, prompt)
+        if names and kind in ("mixed", "unknown"):
+            kinds = {
+                clean_plugin_name(plugin.get("name", "")): plugin_content_kind(plugin)
+                for plugin in (first.get("plugins") or [])
+                if isinstance(plugin, dict)
+            }
+            names = [name + (" (anime)" if kinds.get(name) == "anime" else " (movie/TV)" if kinds.get(name) == "movie_tv" else "") for name in names]
         if names:
             hint = f"for {label}" if label not in ("CloudStream", "Stremio", "content") else ""
             lines.append(f"Try these {hint}: {', '.join(names)}" if hint else f"Try these: {', '.join(names)}")
@@ -1868,6 +1957,10 @@ def format_repo_checks(checks: list, prompt: str = "", preferred: list | None = 
                     lines.append("Not in that manifest: " + ", ".join(missing))
         elif any(k in prompt_lower for k in ("plugin", "plugins", "extension", "extensions")):
             lines.append("I couldn't confirm specific names in that manifest; open it and test one manually.")
+        if mode in ("movie", "cloudstream") and kind == "anime":
+            lines.append("That repo is anime-only; no verified Movie & TV repo was found.")
+        elif mode == "aniyomi" and kind == "movie_tv":
+            lines.append("That repo is Movie & TV; no verified anime repo was found.")
         if first.get("mature"):
             lines.append("Mature content: yes")
         lines.append("Add it in Extension Manager, enable what you need, then search inside Sanin.")
@@ -1959,17 +2052,23 @@ async def github_manifest_search(prompt: str, lang: str = "", mode: str = "") ->
         extensions = ["cloudstream", "aniyomi"]
     else:
         extensions = ["cloudstream"]
+    content_query = "anime" if mode == "aniyomi" else "movie" if mode in ("movie", "cloudstream") else ""
     urls = []
     for extension in extensions:
         found = []
-        for query in (
+        queries = []
+        if content_query:
+            queries.append(f"{lang_query} {extension} {content_query} filename:repo.json")
+        queries.extend((
             f"{lang_query} {extension} filename:repo.json",
             f"{lang_query} {extension} filename:index.min.json",
-        ):
+        ))
+        for query in queries:
             found.extend(await github_code_manifest_urls(query))
             if found:
                 break
-        found.extend(await github_repo_manifest_urls(f"{lang_query} {extension} extension repo"))
+        repo_query = f"{lang_query} {extension} {content_query} extension repo".replace("  ", " ").strip()
+        found.extend(await github_repo_manifest_urls(repo_query))
         for url in found:
             if url not in urls:
                 urls.append(url)
