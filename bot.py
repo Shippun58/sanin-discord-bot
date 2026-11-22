@@ -1544,10 +1544,12 @@ def repo_mode(prompt: str) -> str:
         return "both"
     if addon_present:
         return "stremio"
-    if "aniyomi" in lower or "anime" in lower:
-        return "aniyomi"
-    if any(k in lower for k in ("movie", "movies", "tv", "show", "shows", "series")):
+    wants_movie_tv = bool(re.search(r"\b(movies?|tv|shows?|series|films?)\b", lower))
+    wants_anime = bool(re.search(r"\b(anime|aniyomi)\b", lower))
+    if wants_movie_tv and not re.search(r"\banime\s+(movies?|tv|shows?|series|films?)\b", lower):
         return "movie"
+    if wants_anime:
+        return "aniyomi"
     return "cloudstream"
 
 STREMIO_LANGUAGE_SEARCH = {"spanish": "español", "es": "español", "brazil": "brazil", "brazilian": "brazil"}
