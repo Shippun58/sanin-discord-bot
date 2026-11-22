@@ -1361,6 +1361,8 @@ def is_plugin_followup(prompt: str) -> bool:
         r"^what (?:plugins?|add-?ons?|repos?|ones?)",
         r"^any (?:plugins?|add-?ons?|repos?|recommendations?|suggestions?)",
         r"\b(?:plugins?|add-?ons?|repos?)\b.{0,20}\b(?:for|about) (?:this|that|it)\b",
+        r"^(?:[a-z]+\s+)?ones?[?!.]*$",
+        r"^(?:give|send|show|got|have|need|want)\b.{0,40}\b(?:repos?|plugins?|add-?ons?|extensions?)\b",
         r"^(?:like that|suggestions?|recommendations?)[?!.]*$",
     )
     return any(re.search(pattern, lower) for pattern in patterns)
@@ -1396,7 +1398,9 @@ def asks_extension_repo(prompt: str) -> bool:
     if any(k in lower for k in ("nsfw", "adult", "hentai")) and any(k in lower for k in ("extension", "addon", "add-on", "plugin")):
         return True
     if any(k in lower for k in ("plugin", "plugins")):
-        if any(k in lower for k in ("find", "recommend", "suggest", "which", "best", "good", "working", "get", "should", "need", "want", "overall", "any", "english", "quality", "high", "4k", "sources", "source")):
+        if any(k in lower for k in ("find", "recommend", "suggest", "which", "best", "good", "working", "get", "should", "need", "want", "overall", "any", "english", "quality", "high", "4k", "sources", "source", "meant", "asked", "said", "movie", "movies", "tv", "show", "series", "anime")):
+            return True
+        if any(re.search(rf"(?<![a-z]){re.escape(word)}(?![a-z])", lower) for word in LANGUAGE_HINTS):
             return True
         if re.search(r"\bplugins?\s*\?\s*$", lower):
             return True
