@@ -2291,6 +2291,10 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         for entry in reversed(conversation_history[session_key]):
             previous = str(entry.get("content", "")).strip() if entry.get("role") == "user" else ""
             if previous and previous.lower() != user_prompt.lower() and not retry_re.fullmatch(previous):
+                if is_language_followup(user_prompt):
+                    language_words = "|".join(re.escape(word) for word in sorted(LANGUAGE_HINTS, key=len, reverse=True))
+                    previous = re.sub(rf"(?<![a-z])(?:{language_words})(?![a-z])", " ", previous, flags=re.I)
+                    previous = re.sub(r"\s+", " ", previous).strip()
                 user_prompt = f"{previous} - {user_prompt}"
                 break
     allow_links = is_owner_id(user_id)
