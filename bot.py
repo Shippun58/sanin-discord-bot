@@ -2899,19 +2899,23 @@ async def send_case_log_guild(guild: discord.Guild, case: dict):
 async def send_case_log(interaction: discord.Interaction, case: dict):
     await send_case_log_guild(interaction.guild, case)
 
+DM_ACTIVE_GUILDS: dict[int, int] = {}
+
 def dm_help_text() -> str:
     return (
         "**DM controls (owner only)**\n"
         "`!dm servers` — servers I can see\n"
-        "`!dm channels <server_id>` — text channels in a server\n"
-        "`!dm send <server_id> <channel_id> <message>` — post a message\n"
-        "`!dm kick <server_id> <user_id> [reason]`\n"
-        "`!dm ban <server_id> <user_id> [reason]`\n"
-        "`!dm unban <server_id> <user_id> [reason]`\n"
-        "`!dm warn <server_id> <user_id> [reason]`\n"
-        "`!dm timeout <server_id> <user_id> <duration> [reason]`\n"
-        "`!dm untimeout <server_id> <user_id> [reason]`\n"
-        "Use user IDs or usernames, not mentions, in DMs."
+        "`!dm use <server>` — pick the server once\n"
+        "`!dm status` — show the selected server\n"
+        "`!dm channels [server]` — text channels\n"
+        "`!dm write <channel> <message>` — post a message\n"
+        "`!dm kick <user> [reason]`\n"
+        "`!dm ban <user> [reason]`\n"
+        "`!dm unban <user> [reason]`\n"
+        "`!dm warn <user> [reason]`\n"
+        "`!dm timeout <user> <duration> [reason]`\n"
+        "`!dm untimeout <user> [reason]`\n"
+        "Names work; IDs still work. Quote names with spaces."
     )
 
 async def dm_fetch_guild(guild_id: int) -> discord.Guild | None:
@@ -2923,6 +2927,53 @@ async def dm_fetch_guild(guild_id: int) -> discord.Guild | None:
     except Exception as e:
         logging.warning(f"DM guild fetch failed for {guild_id}: {e}")
         return None
+
+async def dm_guild_matches(value: str) -> list[discord.Guild]:
+    text = str(value).strip().strip('"').strip("'")
+    if not text:
+        return []
+    if text.isdigit():
+        guild = await dm_fetch_guild(int(text))
+        return [guild] if guild else []
+    guilds = list(bot.guilds)
+    exact = [guild for guild in guilds if guild.name.casefold() == text.casefold()]
+    if exact:
+        return exact
+    return [guild for guild in guilds if text.casefold() in guild.name.casefold()]
+
+def dm_channel_matches(guild: discord.Guild, value: str) -> list:
+    text = str(value).strip().strip('"').strip("'").lstrip("#")
+    if not text:
+        return []
+    if text.isdigit():
+        channel = guild.get_channel(int(text))
+        return [channel] if channel else []
+    exact = [channel for channel in guild.text_channels if channel.name.casefold() == text.casefold()]
+    if exact:
+        return exact
+    return [channel for channel in guild.text_channels if text.casefold() in channel.name.casefold()]
+
+def dm_active_guild(user_id: int) -> discord.Guild | None:
+    guild_id = DM_ACTIVE_GUILDS.get(user_id)
+    if guild_id:
+        guild = bot.get_guild(guild_id)
+        if guild:
+            return guild
+        DM_ACTIVE_GUILDS.pop(user_id, None)
+    if len(bot.guilds) == 1:
+        return bot.guilds[0]
+    return None
+
+def dm_take(value: str) -> tuple[str, str]:
+    value = value.lstrip()
+    if not value:
+        return "", ""
+    if value[0] in "\"'":
+        end = value.find(value[0], 1)
+        if end != -1:
+            return value[1:end], value[end + 1:].lstrip()
+    parts = value.split(maxsplit=1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
 
 def dm_bot_member(guild: discord.Guild):
     return guild.me or (guild.get_member(bot.user.id) if bot.user else None)
@@ -3226,36 +3277,77 @@ async def dm_control(ctx, *, args: str = ""):
     if not action or action in ("help", "commands"):
         await ctx.reply(dm_help_text())
         return
+    rest = rest.strip()
     if action == "servers":
-        lines = [f"{guild.name} — `{guild.id}`" for guild in bot.guilds]
+        active = DM_ACTIVE_GUILDS.get(ctx.author.id)
+        lines = [f"{'* ' if guild.id == active else ''}{guild.name} — `{guild.id}`" for guild in bot.guilds]
         await ctx.reply("\n".join(lines) if lines else "I'm not in any servers.")
         return
-    if action == "channels":
-        if not rest.strip().isdigit():
-            await ctx.reply("Use `!dm channels <server_id>`.")
+    if action in ("use", "server"):
+        if not rest:
+            guild = dm_active_guild(ctx.author.id)
+            if guild:
+                await ctx.reply(f"Active server: **{guild.name}**. Use `!dm use <server>` to change it.")
+            else:
+                await ctx.reply("Use `!dm use <server>` first.\n" + "\n".join(guild.name for guild in bot.guilds))
             return
-        guild = await dm_fetch_guild(int(rest.strip()))
+        matches = await dm_guild_matches(rest)
+        if not matches:
+            await ctx.reply("I couldn't find that server. Try `!dm servers`.")
+            return
+        if len(matches) > 1:
+            await ctx.reply("That matches more than one server:\n" + "\n".join(f"{guild.name} — `{guild.id}`" for guild in matches[:10]))
+            return
+        DM_ACTIVE_GUILDS[ctx.author.id] = matches[0].id
+        await ctx.reply(f"Active server set to **{matches[0].name}**.")
+        return
+    guild = dm_active_guild(ctx.author.id)
+    if action in ("status", "current"):
         if guild is None:
-            await ctx.reply("I can't access that server.")
+            await ctx.reply("No server selected. Use `!dm use <server>`.")
+        else:
+            await ctx.reply(f"Active server: **{guild.name}** — `{guild.id}`\nChannels: {len(guild.text_channels)}")
+        return
+    if action == "channels":
+        if rest:
+            matches = await dm_guild_matches(rest)
+            if not matches:
+                await ctx.reply("I couldn't find that server. Try `!dm servers`.")
+                return
+            if len(matches) > 1:
+                await ctx.reply("That matches more than one server:\n" + "\n".join(f"{guild.name} — `{guild.id}`" for guild in matches[:10]))
+                return
+            guild = matches[0]
+        if guild is None:
+            await ctx.reply("No server selected. Use `!dm use <server>`.")
             return
         channels = [f"#{channel.name} — `{channel.id}`" for channel in guild.text_channels]
         await ctx.reply("\n".join(channels[:100]) if channels else "No text channels found.")
         return
     if action in ("send", "write"):
-        parts = rest.split(maxsplit=2)
-        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
-            await ctx.reply("Use `!dm write <server_id> <channel_id> <message>`.")
+        if not rest:
+            await ctx.reply("Use `!dm write <channel> <message>`.")
             return
-        guild = await dm_fetch_guild(int(parts[0]))
-        if guild is None:
-            await ctx.reply("I can't access that server.")
+        first, remainder = dm_take(rest)
+        second, remainder2 = dm_take(remainder)
+        old_guild = await dm_fetch_guild(int(first)) if first.isdigit() else None
+        if old_guild and second.isdigit() and remainder2:
+            guild, channel_value, text = old_guild, second, remainder2
+        else:
+            if guild is None:
+                await ctx.reply("No server selected. Use `!dm use <server>`.")
+                return
+            channel_value, text = first, remainder
+        matches = dm_channel_matches(guild, channel_value)
+        if not matches:
+            await ctx.reply("I couldn't find that channel. Try `!dm channels`.")
             return
-        try:
-            channel = guild.get_channel(int(parts[1])) or await guild.fetch_channel(int(parts[1]))
-        except Exception:
-            channel = None
+        if len(matches) > 1:
+            await ctx.reply("That matches more than one channel:\n" + "\n".join(f"#{channel.name} — `{channel.id}`" for channel in matches[:10]))
+            return
+        channel = matches[0]
         if not isinstance(channel, discord.abc.Messageable):
-            await ctx.reply("I can't find that channel.")
+            await ctx.reply("I can't use that channel.")
             return
         me = dm_bot_member(guild)
         if me is None:
@@ -3264,7 +3356,7 @@ async def dm_control(ctx, *, args: str = ""):
         if not channel.permissions_for(me).send_messages:
             await ctx.reply("I need send messages permission in that channel.")
             return
-        text = parts[2].strip()
+        text = text.strip()
         if not text:
             await ctx.reply("Give me a message to post.")
             return
@@ -3282,28 +3374,35 @@ async def dm_control(ctx, *, args: str = ""):
     if action not in ("kick", "ban", "unban", "warn", "timeout", "untimeout"):
         await ctx.reply(dm_help_text())
         return
-    if action == "timeout":
-        parts = rest.split(maxsplit=3)
-        if len(parts) < 3 or not parts[0].isdigit():
-            await ctx.reply("Use `!dm timeout <server_id> <user_id> <duration> [reason]`.")
-            return
-        guild_id, target_value, duration = int(parts[0]), parts[1], parts[2]
-        reason = parts[3] if len(parts) > 3 else ""
-    else:
-        parts = rest.split(maxsplit=2)
-        if len(parts) < 2 or not parts[0].isdigit():
-            await ctx.reply(f"Use `!dm {action} <server_id> <user_id> [reason]`.")
-            return
-        guild_id, target_value = int(parts[0]), parts[1]
-        reason = parts[2] if len(parts) > 2 else ""
-    reason = reason.strip() or "No reason given"
-    guild = await dm_fetch_guild(guild_id)
-    if guild is None:
-        await ctx.reply("I can't access that server.")
+    if not rest:
+        if action == "timeout":
+            await ctx.reply("Use `!dm timeout <user> <duration> [reason]`.")
+        else:
+            await ctx.reply(f"Use `!dm {action} <user> [reason]`.")
         return
+    first, remainder = dm_take(rest)
+    old_guild = await dm_fetch_guild(int(first)) if first.isdigit() else None
+    if old_guild:
+        if not remainder:
+            await ctx.reply(f"Use `!dm {action} <user> [reason]`.")
+            return
+        guild, target_value, remainder = old_guild, *dm_take(remainder)
+    else:
+        target_value = first
+    if guild is None:
+        await ctx.reply("No server selected. Use `!dm use <server>`.")
+        return
+    if action == "timeout":
+        duration, reason = dm_take(remainder)
+        if not duration:
+            await ctx.reply("Use `!dm timeout <user> <duration> [reason]`.")
+            return
+    else:
+        reason = remainder
+    reason = reason.strip() or "No reason given"
     target = await resolve_user(guild, target_value) if action == "unban" else await resolve_member(guild, target_value)
     if target is None:
-        await ctx.reply("User not found. Use their user ID or exact username.")
+        await ctx.reply("User not found. Use their username or user ID.")
         return
     permission = {"kick": "kick_members", "ban": "ban_members", "unban": "ban_members", "timeout": "moderate_members", "untimeout": "moderate_members"}.get(action)
     if permission:
@@ -3316,6 +3415,7 @@ async def dm_control(ctx, *, args: str = ""):
         if problem:
             await ctx.reply(problem)
             return
+    duration_label = None
     try:
         if action == "kick":
             await target.kick(reason=f"{reason} | by {ctx.author} (DM)")
@@ -3332,9 +3432,9 @@ async def dm_control(ctx, *, args: str = ""):
             case = await create_case(guild.id, "warn", target, reason, ctx.author, warning_add=warning)
         elif action == "timeout":
             seconds = parse_duration(duration)
-            label = format_duration(seconds)
+            duration_label = format_duration(seconds)
             await target.timeout(datetime.now(timezone.utc) + timedelta(seconds=seconds), reason=f"{reason} | by {ctx.author} (DM)")
-            case = await create_case(guild.id, "timeout", target, reason, ctx.author, duration=label)
+            case = await create_case(guild.id, "timeout", target, reason, ctx.author, duration=duration_label)
         else:
             if not target.is_timed_out():
                 await ctx.reply("That user is not timed out.")
@@ -3351,7 +3451,7 @@ async def dm_control(ctx, *, args: str = ""):
         logging.warning(f"DM moderation failed: {e}")
         await ctx.reply("Discord blocked that action. Check my permissions and role order.")
         return
-    await dm_finish_action(ctx, guild, action, target, reason, case, locals().get("label"))
+    await dm_finish_action(ctx, guild, action, target, reason, case, duration_label)
 
 @bot.command(name="tone")
 async def tone_prefix_cmd(ctx, *, description: str):
