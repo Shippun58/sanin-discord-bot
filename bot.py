@@ -2099,6 +2099,16 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         if repo_answer:
             await record_exchange(session_key, user_prompt, repo_answer)
             return repo_answer
+        lang = language_hint(user_prompt)
+        if lang:
+            reply = (
+                f"I couldn't verify a working {lang} repo right now because the live search was rate-limited. "
+                "I won't invent a shortcode. Try again shortly, or paste a repo URL and I'll test it."
+            )
+        else:
+            reply = "I couldn't verify a working repo right now. Try again shortly, or paste a repo URL and I'll test it."
+        await record_exchange(session_key, user_prompt, reply)
+        return reply
 
     media_answer = None if skip_media_lookup else await media_disambiguation(user_prompt)
     if media_answer:
