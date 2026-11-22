@@ -2884,17 +2884,77 @@ def missing_bot_permission(interaction: discord.Interaction, permission: str) ->
         return f"I need the {permission.replace('_', ' ')} permission."
     return None
 
-async def send_case_log(interaction: discord.Interaction, case: dict):
+async def send_case_log_guild(guild: discord.Guild, case: dict):
     channel_id = os.getenv("MODLOG_CHANNEL_ID", "").strip()
     if not channel_id.isdigit():
         return
-    channel = interaction.guild.get_channel(int(channel_id))
+    channel = guild.get_channel(int(channel_id))
     if channel is None:
         return
     try:
         await channel.send(embed=case_embed(case))
     except Exception as e:
         logging.warning(f"Modlog send failed: {e}")
+
+async def send_case_log(interaction: discord.Interaction, case: dict):
+    await send_case_log_guild(interaction.guild, case)
+
+def dm_help_text() -> str:
+    return (
+        "**DM controls (owner only)**\n"
+        "`!dm servers` — servers I can see\n"
+        "`!dm channels <server_id>` — text channels in a server\n"
+        "`!dm send <server_id> <channel_id> <message>` — post a message\n"
+        "`!dm kick <server_id> <user_id> [reason]`\n"
+        "`!dm ban <server_id> <user_id> [reason]`\n"
+        "`!dm unban <server_id> <user_id> [reason]`\n"
+        "`!dm warn <server_id> <user_id> [reason]`\n"
+        "`!dm timeout <server_id> <user_id> <duration> [reason]`\n"
+        "`!dm untimeout <server_id> <user_id> [reason]`\n"
+        "Use user IDs or usernames, not mentions, in DMs."
+    )
+
+async def dm_fetch_guild(guild_id: int) -> discord.Guild | None:
+    guild = bot.get_guild(guild_id)
+    if guild:
+        return guild
+    try:
+        return await bot.fetch_guild(guild_id)
+    except Exception as e:
+        logging.warning(f"DM guild fetch failed for {guild_id}: {e}")
+        return None
+
+def dm_bot_member(guild: discord.Guild):
+    return guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+
+def dm_permission_problem(guild: discord.Guild, permission: str) -> str | None:
+    me = dm_bot_member(guild)
+    if me is None:
+        return "I couldn't load my server member record."
+    if not getattr(me.guild_permissions, permission, False):
+        return f"I need the {permission.replace('_', ' ')} permission in that server."
+    return None
+
+def dm_hierarchy_problem(guild: discord.Guild, target) -> str | None:
+    me = dm_bot_member(guild)
+    if me is None:
+        return "I couldn't load my server member record."
+    if target.id == guild.owner_id:
+        return "I cannot action the server owner."
+    if target.id == me.id:
+        return "I cannot action myself."
+    if me.top_role <= target.top_role:
+        return "My role is not above that user."
+    return None
+
+async def dm_finish_action(ctx, guild: discord.Guild, action: str, target, reason: str, case: dict, duration: str | None = None) -> None:
+    await send_case_log_guild(guild, case)
+    logging.info(f"[DM] {ctx.author} {action} guild={guild.id} target={target.id} case={case['id']}")
+    past = {"kick": "Kicked", "ban": "Banned", "unban": "Unbanned", "warn": "Warned", "untimeout": "Removed timeout from"}
+    text = f"{past.get(action, action.title())} {target} in **{guild.name}**. Case {case['id']}."
+    if action == "timeout" and duration:
+        text = f"Timed out {target} in **{guild.name}** for {duration}. Case {case['id']}."
+    await ctx.reply(text)
 
 async def publish_moderation(interaction: discord.Interaction, action: str, target, reason: str, case: dict, channel, duration: str | None = None, role=None, nickname=None, phrase: str | None = None) -> str | None:
     values = {
@@ -2990,6 +3050,10 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
     is_dm = isinstance(message.channel, discord.DMChannel)
+
+    if is_dm and message.content.startswith("!"):
+        await bot.process_commands(message)
+        return
 
     if is_mentioned or is_reply_to_bot or is_dm:
         clean = message.clean_content.replace(f"@{bot.user.name}", "").strip()
@@ -3148,6 +3212,146 @@ async def memory_prefix_cmd(ctx):
         return
     for chunk in split_message("\n".join(lines)):
         await ctx.reply(chunk)
+
+@bot.command(name="dm")
+async def dm_control(ctx, *, args: str = ""):
+    if not isinstance(ctx.channel, discord.DMChannel):
+        await ctx.reply("Use `!dm` in a DM with me.")
+        return
+    if not is_owner(ctx.author):
+        await ctx.reply("Owner only.")
+        return
+    action, _, rest = args.strip().partition(" ")
+    action = action.lower()
+    if not action or action in ("help", "commands"):
+        await ctx.reply(dm_help_text())
+        return
+    if action == "servers":
+        lines = [f"{guild.name} — `{guild.id}`" for guild in bot.guilds]
+        await ctx.reply("\n".join(lines) if lines else "I'm not in any servers.")
+        return
+    if action == "channels":
+        if not rest.strip().isdigit():
+            await ctx.reply("Use `!dm channels <server_id>`.")
+            return
+        guild = await dm_fetch_guild(int(rest.strip()))
+        if guild is None:
+            await ctx.reply("I can't access that server.")
+            return
+        channels = [f"#{channel.name} — `{channel.id}`" for channel in guild.text_channels]
+        await ctx.reply("\n".join(channels[:100]) if channels else "No text channels found.")
+        return
+    if action in ("send", "write"):
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            await ctx.reply("Use `!dm write <server_id> <channel_id> <message>`.")
+            return
+        guild = await dm_fetch_guild(int(parts[0]))
+        if guild is None:
+            await ctx.reply("I can't access that server.")
+            return
+        try:
+            channel = guild.get_channel(int(parts[1])) or await guild.fetch_channel(int(parts[1]))
+        except Exception:
+            channel = None
+        if not isinstance(channel, discord.abc.Messageable):
+            await ctx.reply("I can't find that channel.")
+            return
+        me = dm_bot_member(guild)
+        if me is None:
+            await ctx.reply("I couldn't load my server member record.")
+            return
+        if not channel.permissions_for(me).send_messages:
+            await ctx.reply("I need send messages permission in that channel.")
+            return
+        text = parts[2].strip()
+        if not text:
+            await ctx.reply("Give me a message to post.")
+            return
+        try:
+            first = None
+            for chunk in split_message(text, 3900):
+                sent = await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+                first = first or sent
+            logging.info(f"[DM] {ctx.author} write guild={guild.id} channel={channel.id}")
+            await ctx.reply(f"Posted to {channel.mention}: {first.jump_url}")
+        except Exception as e:
+            logging.warning(f"DM write failed: {e}")
+            await ctx.reply("Couldn't post that. Check my permissions in the channel.")
+        return
+    if action not in ("kick", "ban", "unban", "warn", "timeout", "untimeout"):
+        await ctx.reply(dm_help_text())
+        return
+    if action == "timeout":
+        parts = rest.split(maxsplit=3)
+        if len(parts) < 3 or not parts[0].isdigit():
+            await ctx.reply("Use `!dm timeout <server_id> <user_id> <duration> [reason]`.")
+            return
+        guild_id, target_value, duration = int(parts[0]), parts[1], parts[2]
+        reason = parts[3] if len(parts) > 3 else ""
+    else:
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 2 or not parts[0].isdigit():
+            await ctx.reply(f"Use `!dm {action} <server_id> <user_id> [reason]`.")
+            return
+        guild_id, target_value = int(parts[0]), parts[1]
+        reason = parts[2] if len(parts) > 2 else ""
+    reason = reason.strip() or "No reason given"
+    guild = await dm_fetch_guild(guild_id)
+    if guild is None:
+        await ctx.reply("I can't access that server.")
+        return
+    target = await resolve_user(guild, target_value) if action == "unban" else await resolve_member(guild, target_value)
+    if target is None:
+        await ctx.reply("User not found. Use their user ID or exact username.")
+        return
+    permission = {"kick": "kick_members", "ban": "ban_members", "unban": "ban_members", "timeout": "moderate_members", "untimeout": "moderate_members"}.get(action)
+    if permission:
+        problem = dm_permission_problem(guild, permission)
+        if problem:
+            await ctx.reply(problem)
+            return
+    if action in ("kick", "ban", "timeout"):
+        problem = dm_hierarchy_problem(guild, target)
+        if problem:
+            await ctx.reply(problem)
+            return
+    try:
+        if action == "kick":
+            await target.kick(reason=f"{reason} | by {ctx.author} (DM)")
+            case = await create_case(guild.id, "kick", target, reason, ctx.author)
+        elif action == "ban":
+            await guild.ban(target, reason=f"{reason} | by {ctx.author} (DM)", delete_message_seconds=0)
+            case = await create_case(guild.id, "ban", target, reason, ctx.author)
+        elif action == "unban":
+            await guild.fetch_ban(target)
+            await guild.unban(target, reason=f"{reason} | by {ctx.author} (DM)")
+            case = await create_case(guild.id, "unban", target, reason, ctx.author)
+        elif action == "warn":
+            warning = {"reason": reason, "at": datetime.now(timezone.utc).isoformat(), "moderator_id": ctx.author.id}
+            case = await create_case(guild.id, "warn", target, reason, ctx.author, warning_add=warning)
+        elif action == "timeout":
+            seconds = parse_duration(duration)
+            label = format_duration(seconds)
+            await target.timeout(datetime.now(timezone.utc) + timedelta(seconds=seconds), reason=f"{reason} | by {ctx.author} (DM)")
+            case = await create_case(guild.id, "timeout", target, reason, ctx.author, duration=label)
+        else:
+            if not target.is_timed_out():
+                await ctx.reply("That user is not timed out.")
+                return
+            await target.timeout(None, reason=f"{reason} | by {ctx.author} (DM)")
+            case = await create_case(guild.id, "untimeout", target, reason, ctx.author)
+    except discord.NotFound:
+        await ctx.reply("That user is not banned." if action == "unban" else "That user is no longer in the server.")
+        return
+    except ValueError as e:
+        await ctx.reply(str(e))
+        return
+    except Exception as e:
+        logging.warning(f"DM moderation failed: {e}")
+        await ctx.reply("Discord blocked that action. Check my permissions and role order.")
+        return
+    await dm_finish_action(ctx, guild, action, target, reason, case, locals().get("label"))
 
 @bot.command(name="tone")
 async def tone_prefix_cmd(ctx, *, description: str):
