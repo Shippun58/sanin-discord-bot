@@ -23,7 +23,8 @@
       "name": "Shippun",
       "facts": [
         "he is my fellow developer"
-      ]
+      ],
+      "tone": "harsh and blunt; skip pleasantries and give it to them straight"
     }
   },
   "sessions": {}
