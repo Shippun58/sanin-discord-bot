@@ -1394,7 +1394,7 @@ def is_social_chat(prompt: str) -> bool:
 def has_media_lookup_cue(prompt: str) -> bool:
     lower = prompt.lower()
     return bool(re.search(
-        r"\b(?:look(?:ing)?(?: up| for)?|find(?:ing)?|search(?:ing)?(?: for)?|show me|tell me about|what(?:'s|s| is)|who(?:'s|s| is)|info(?:rmation)? on|release date|when (?:is|does|will|did)|do you know|is there|(?:movie|anime|show|series|tv show|tv series)\s+(?:called|named)|google)\b",
+        r"\b(?:look(?:ing)?(?: up| for)?|find(?:ing)?|search(?:ing)?(?: for)?|show me|tell me about|what(?:'s|s| is)|who(?:'s|s| is)|info(?:rmation)? on|release date|when (?:is|does|will|did)|do you know|is there|should i (?:watch|read|check)|(?:movie|anime|show|series|tv show|tv series)\s+(?:called|named)|tmdb|imdb|anilist|google)\b",
         lower,
     ))
 
@@ -1441,6 +1441,7 @@ def extract_media_title(prompt: str) -> str:
     text = re.sub(r"^(?:hey|hi|hello|san)\b[,\s]+", "", text, flags=re.I)
     prefix = (
         r"(?:can|could|would|will)\s+you(?:\s+please)?"
+        r"|(?:but|and|so)?\s*should i (?:watch|read|check)"
         r"|(?:please|pls)"
         r"|look(?:ing)? up|look(?:ing)? for|look at|find(?:ing)?|search(?:ing)?(?: for)?"
         r"|show me|tell me about|what(?:'s|s| is)|who(?:'s|s| is)|info(?:rmation)? on|do you know"
@@ -1451,10 +1452,14 @@ def extract_media_title(prompt: str) -> str:
         if cleaned == text:
             break
         text = cleaned
+    text = re.sub(r"^(?:the\s+)?(?:new|latest)\s+(?:show|series|movie|anime)\s+", "", text, flags=re.I)
     text = re.sub(r"^(?:a|an|the)\s+", "", text, flags=re.I)
     text = re.sub(r"^.*?\b(?:movie|anime|show|series|tv show|tv series)\s+(?:called|named)\s+", "", text, flags=re.I)
     text = re.sub(r"^(?:movie|anime|show|series|tv show|tv series)\s+(?:called|named)\s+", "", text, flags=re.I)
     text = re.sub(r"^(?:movie|anime|show|series|tv show|tv series)\s+", "", text, flags=re.I)
+    text = re.sub(r"\s+(?:in|on)\s+(?:tmdb|imdb|anilist|netflix|hulu|prime video|disney\+?|hbo max|max)\s*$", "", text, flags=re.I)
+    text = re.sub(r"^(?:search|look up|check)\s+(?:on\s+)?(?:tmdb|imdb|anilist)\s*$", "", text, flags=re.I)
+    text = re.sub(r"^(?:tmdb|imdb|anilist)$", "", text, flags=re.I)
     text = re.sub(r"\s+(?:anime|manga)\s+or\s+(?:live action|movie|tv|tv show|tv series)\s*$", "", text, flags=re.I)
     if re.search(r"\bwhen (?:is|does|will|did)\b", prompt, re.I):
         text = re.sub(r"\s+(?:release|come out|air|premiere|start)\s*$", "", text, flags=re.I)
@@ -1544,10 +1549,51 @@ def looks_like_media_title(title: str) -> bool:
         return False
     return len(re.sub(r"[^a-z0-9]+", "", lower)) >= 2
 
-async def media_disambiguation(prompt: str) -> str | None:
-    if not is_media_lookup_prompt(prompt):
-        return None
-    title = extract_media_title(prompt)
+def is_media_followup(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    if len(prompt.split()) > 14:
+        return False
+    if is_social_chat(prompt) or is_watch_request(prompt) or asks_extension_repo(prompt):
+        return False
+    return bool(re.search(
+        r"\b(?:the (?:new|same|other) one|this one|that one|new one|from this year|last year|next year|tv show|tv series|not (?:a )?movie|it'?s (?:a |an )?(?:tv|movie|show|series)|is it (?:good|worth)|should i (?:watch|read|check)|who (?:created|made|wrote|directed)|created by|made by|the one by|author|creator|director)\b",
+        lower,
+    ))
+
+def is_short_media_reference(prompt: str) -> bool:
+    if not 2 <= len(prompt.split()) <= 4:
+        return False
+    if is_info_request(prompt) or is_social_chat(prompt) or asks_extension_repo(prompt) or is_watch_request(prompt):
+        return False
+    if re.fullmatch(r"(?:search|look up|check)?\s*(?:on\s+)?(?:tmdb|imdb|anilist)[?.!]*", prompt.lower().strip()):
+        return False
+    return True
+
+def recent_media_title(session_key: str) -> str:
+    generic = {"tmdb", "imdb", "anilist", "the movie database"}
+    media_markers = re.compile(r"\b(?:movie|film|show|series|anime|tv|season|episode|tmdb|anilist|watch|cast|plot)\b", re.I)
+    for entry in reversed(conversation_history.get(session_key, [])[-10:]):
+        content = str(entry.get("content", ""))
+        if entry.get("role") == "assistant":
+            if not media_markers.search(content):
+                continue
+            for match in re.findall(r"\*\*([^*\n]{2,80})\*\*", content):
+                title = re.sub(r"\s*\((?:19|20)\d{2}\).*$", "", match).strip()
+                title = re.sub(r"\s+[–-]\s+.*$", "", title).strip()
+                if title and title.lower() not in generic and looks_like_media_title(title):
+                    return title
+        elif entry.get("role") == "user" and (has_media_lookup_cue(content) or media_markers.search(content)):
+            title = extract_media_title(content)
+            if title and title.lower() not in generic and looks_like_media_title(title):
+                return title
+    return ""
+
+async def media_disambiguation(prompt: str, title_hint: str = "") -> str | None:
+    title = title_hint.strip()
+    if not title:
+        if not is_media_lookup_prompt(prompt):
+            return None
+        title = extract_media_title(prompt)
     if len(title) < 2 or not looks_like_media_title(title):
         return None
     lower = prompt.lower()
@@ -1571,7 +1617,18 @@ async def media_disambiguation(prompt: str) -> str | None:
     live_raw = raw_hits.get("tv") or raw_hits.get("movie")
     imdb_raw = raw_hits.get("imdb")
     anime_hit = compact_anilist([anime_raw])[0] if anime_raw else None
+    if anime_hit and title_hint and normalize_media_title(anime_hit.get("title")) != normalize_media_title(title):
+        anime_hit = None
     live_hit = compact_tmdb([live_raw])[0] if live_raw else None
+    creator_line = ""
+    if live_hit and re.search(r"\b(?:who (?:created|made|wrote|directed)|created by|made by|the one by|author|creator|director)\b", lower):
+        try:
+            detail = await tmdb_details(live_raw)
+            creators = [person.get("name") for person in detail.get("created_by") or [] if person.get("name")]
+            if creators:
+                creator_line = f"\nCreated by: {', '.join(creators[:3])}"
+        except Exception as e:
+            logging.warning(f"TMDB creator lookup failed: {e}")
     if anime_hit and live_hit and same_media_hit(anime_hit, live_hit):
         text = f"Found it: {format_media_hit('AniList', anime_hit)}"
         if live_hit.get("url"):
@@ -1585,11 +1642,11 @@ async def media_disambiguation(prompt: str) -> str | None:
             "Do you want the TV/movie one or the anime one?"
         )
     if anime_hit:
-        return f"Found it on AniList: {format_media_hit('AniList', anime_hit)}"
+        return f"Found it — {format_media_hit('AniList', anime_hit)}"
     if live_hit:
-        return f"Found it on TMDB: {format_media_hit('TMDB', live_hit)}"
+        return f"Found it — {format_media_hit('TMDB', live_hit)}{creator_line}"
     if imdb_raw:
-        return f"Found it on IMDb: {format_media_hit('IMDb', imdb_raw)}"
+        return f"Found it — {format_media_hit('IMDb', imdb_raw)}"
     return None
 
 def wants_recent_context(prompt: str) -> bool:
@@ -2616,7 +2673,7 @@ async def classify_prompt_intent(session_key: str, prompt: str, summary: str = "
         "support - asks for Sanin app help, setup, settings, bugs, or troubleshooting\n"
         "moderation - asks to ban, kick, warn, timeout, or manage members\n"
         "other - a general factual, opinion, or how-to question that is not the above\n"
-        "Use the recent context for short follow-ups. Do not treat reactions or bare titles as lookups."
+        "Use the recent context for short follow-ups. Do not treat reactions as lookups; a bare title or qualifier immediately after media discussion is a media_lookup."
     )
     user = ("Recent context:\n" + ("\n".join(context) if context else "(none)") + f"\nCurrent message: {prompt[:1200]}\nLabel:").strip()
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -2660,6 +2717,10 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
                     previous = re.sub(r"\s+", " ", previous).strip()
                 user_prompt = f"{previous} - {user_prompt}"
                 break
+    media_context_title = recent_media_title(session_key)
+    media_followup = bool(media_context_title) and not is_evaluative_followup(original_prompt) and (
+        is_media_followup(original_prompt) or is_short_media_reference(original_prompt)
+    )
     allow_links = is_owner_id(user_id)
     if not allow_links and (is_security_probe(user_prompt) or wants_sanin_links(user_prompt)):
         await record_exchange(session_key, user_prompt, SECURITY_REFUSAL)
@@ -2691,6 +2752,8 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     logging.info(f"[INTENT] {intent} in {time.monotonic() - intent_started:.2f}s text={original_prompt[:120]}")
     social_chat = intent == "social"
     skip_media_lookup = skip_media_lookup or intent in ("social", "watch", "support", "moderation", "repo", "other", "web_check")
+    if media_followup and intent in ("media_lookup", "watch", "unknown", "other"):
+        skip_media_lookup = False
     repo_intent = intent == "repo" and any(k in user_prompt.lower() for k in ("repo", "plugin", "addon", "add-on", "extension"))
     if asks_extension_repo(user_prompt) or repo_intent:
         if status:
@@ -2710,10 +2773,17 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         await record_exchange(session_key, user_prompt, reply)
         return reply
 
-    media_answer = None if skip_media_lookup else await media_disambiguation(user_prompt)
+    media_title_hint = media_context_title if media_followup else ""
+    if not media_title_hint and intent == "media_lookup" and not re.search(r"\b(?:vs\.?|versus|who would win)\b", original_prompt, re.I):
+        candidate = extract_media_title(original_prompt)
+        if looks_like_media_title(candidate):
+            media_title_hint = candidate
+    media_lookup_attempted = intent == "media_lookup" or is_media_lookup_prompt(original_prompt) or media_followup
+    media_answer = None if skip_media_lookup else await media_disambiguation(user_prompt, media_title_hint)
     if media_answer:
         await record_exchange(session_key, user_prompt, media_answer)
         return media_answer
+    media_lookup_missed = media_answer is None and media_lookup_attempted
 
     recent_video_ids = []
     if wants_fresh_check(original_prompt):
@@ -2736,6 +2806,8 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
     if lookup_failed or "Live lookup failed" in verified:
         system_prompt += "\n\nLookup accuracy rule: live verification failed or timed out. Do not claim that a recent video, episode, match, or event does not exist. Say you could not verify it right now instead of guessing."
+    if media_lookup_missed:
+        system_prompt += "\n\nMedia lookup rule: no verified TMDB/AniList match was returned. Do not invent a year, plot, cast, creator, platform, season count, or episode count. Ask for the exact title or say you could not verify it."
     if social_chat:
         system_prompt += "\n\nConversation mode: this is casual talk, a joke, or a dismissal, not a lookup. Reply like a person in a chat. Keep it short, react to what they actually said, and do not search, list titles, explain the app, or ask a generic 'what do you need'."
     if is_watch_request(user_prompt):
