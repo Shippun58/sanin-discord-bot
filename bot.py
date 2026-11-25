@@ -757,6 +757,12 @@ def clean_reply(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
+def strip_self_prefix(text: str, user_name: str) -> str:
+    name = re.escape((user_name or "").strip())
+    if not name:
+        return text
+    return re.sub(rf"^\s*(?:\*\*|__)?{name}(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*", "", text, count=1, flags=re.I)
+
 def split_message(text: str, limit: int = 1900) -> list[str]:
     text = text.strip()
     if not text:
@@ -996,7 +1002,7 @@ async def web_search(query: str) -> list:
                     method,
                     url,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=12),
+                    timeout=aiohttp.ClientTimeout(total=4),
                     **kwargs,
                 ) as resp:
                     if resp.status != 200:
@@ -1177,9 +1183,15 @@ def is_social_chat(prompt: str) -> bool:
     lower = prompt.lower().strip()
     if len(prompt.split()) > 18:
         return False
-    if re.fullmatch(r"(?:nothing|nvm|never ?mind|no|nah|nope|ok|okay|k|alright|cool|thanks|thank you|ty|fair enough|makes sense|i see|got it|sure|yeah|yep|look|listen|find|search|lame|mid|cringe|weird|dumb|stupid|boring|bad|meh|sucks|trash|garbage|annoying|nice|good|great|wow|bruh|bro|lol|lmao|haha|funny|true|facts)[!. ]*", lower):
+    if re.fullmatch(r"(?:nothing|nvm|never ?mind|no|nah|nope|ok|okay|k|alright|cool|thanks|thank you|ty|fair enough|makes sense|i see|got it|sure|yeah|yep|look|listen|find|search|lame|mid|cringe|weird|dumb|stupid|boring|bad|meh|sucks|trash|garbage|annoying|nice|good|great|wow|bruh|bro|lol|lmao|haha|funny|true|facts|mad tings?|tf|wtf)[!. ]*", lower):
         return True
     patterns = (
+        r"^(?:tf|wtf)\b",
+        r"^(?:what'?s|what is) wrong with you\b",
+        r"^who(?:'s| is) your (?:manager|owner|boss|dev|developer)\b",
+        r"^(?:are|r) (?:you|u) (?:dumb|stupid|serious|ok|okay|good|drunk|high)\b",
+        r"^why (?:are|r) (?:you|u)\b.{0,40}\b(?:dumb|stupid|weird|like that|like this)\b",
+        r"^mad tings?\b",
         r"\bi (?:never|didn'?t|did not) ask(?:ed)?\b",
         r"\b(?:that'?s|that is|this is) not what i\b",
         r"\bnot what i (?:asked|meant|said)\b",
@@ -1200,7 +1212,7 @@ def is_social_chat(prompt: str) -> bool:
 def has_media_lookup_cue(prompt: str) -> bool:
     lower = prompt.lower()
     return bool(re.search(
-        r"\b(?:look(?:ing)?(?: up| for)?|find(?:ing)?|search(?:ing)?(?: for)?|show me|tell me about|what(?:'s|s| is)|who(?:'s|s| is)|info(?:rmation)? on|release date|when (?:is|does|will|did)|do you know|is there|movie called|anime called|show called|series called|google)\b",
+        r"\b(?:look(?:ing)?(?: up| for)?|find(?:ing)?|search(?:ing)?(?: for)?|show me|tell me about|what(?:'s|s| is)|who(?:'s|s| is)|info(?:rmation)? on|release date|when (?:is|does|will|did)|do you know|is there|(?:movie|anime|show|series|tv show|tv series)\s+(?:called|named)|google)\b",
         lower,
     ))
 
@@ -1212,7 +1224,12 @@ def is_media_lookup_prompt(prompt: str) -> bool:
         return False
     if re.search(r"\b(vs\.?|versus|who would win|source code|hosted|created you|your name|who are you|moderation|ban|kick)\b", lower):
         return False
-    if len(prompt.split()) > 7:
+    words = len(prompt.split())
+    if words > 7 and not re.search(r"\b(?:movie|anime|show|series|tv show|tv series|film|character)\b", lower):
+        return False
+    if words > 16:
+        return False
+    if re.match(r"^(?:who is|who's|what is|what's)\b", lower) and re.search(r"\b(?:the|a|an|of|between|difference|meaning|capital|population|weather)\b", lower) and not re.search(r"\b(?:movie|anime|show|series|tv|film|character|called|named)\b", lower):
         return False
     smalltalk = r"^(hi|hello|hey|yo|thanks|thank you|ok|okay|yes|no|what|why|how|where|who)[!. ]*$"
     if re.fullmatch(smalltalk, lower):
@@ -1253,12 +1270,33 @@ def extract_media_title(prompt: str) -> str:
             break
         text = cleaned
     text = re.sub(r"^(?:a|an|the)\s+", "", text, flags=re.I)
+    text = re.sub(r"^.*?\b(?:movie|anime|show|series|tv show|tv series)\s+(?:called|named)\s+", "", text, flags=re.I)
     text = re.sub(r"^(?:movie|anime|show|series|tv show|tv series)\s+(?:called|named)\s+", "", text, flags=re.I)
     text = re.sub(r"^(?:movie|anime|show|series|tv show|tv series)\s+", "", text, flags=re.I)
     text = re.sub(r"\s+(?:anime|manga)\s+or\s+(?:live action|movie|tv|tv show|tv series)\s*$", "", text, flags=re.I)
     if re.search(r"\bwhen (?:is|does|will|did)\b", prompt, re.I):
         text = re.sub(r"\s+(?:release|come out|air|premiere|start)\s*$", "", text, flags=re.I)
+    text = re.sub(r"[,;]?\s*(?:do you know(?: it| this| that)?|you know(?: it)?)\s*$", "", text, flags=re.I)
     return text.strip()[:80]
+
+def needs_web_search(prompt: str) -> bool:
+    lower = prompt.lower()
+    if is_social_chat(prompt) or is_watch_request(prompt) or asks_extension_repo(prompt):
+        return False
+    return bool(re.search(
+        r"\b(?:web|google|online|internet|latest|current|currently|today|tonight|recent|news|price|prices|stock|weather|score|scores|election|release date|who won|when did|how much|where can i buy)\b",
+        lower,
+    ))
+
+def needs_context_lookup(prompt: str) -> bool:
+    if is_social_chat(prompt) or is_watch_request(prompt) or asks_extension_repo(prompt):
+        return False
+    if is_media_lookup_prompt(prompt) or needs_web_search(prompt):
+        return True
+    return bool(re.search(
+        r"\b(?:anime|manga|movie|movies|film|films|show|shows|series|tv|character|characters|release|episode|episodes|season|seasons|chapter|chapters|score|compare|versus|vs|recommend|worth|trailer|cast|plot|nsfw|hentai)\b",
+        prompt.lower(),
+    ))
 
 def normalize_media_title(value: str) -> str:
     text = str(value or "").lower()
@@ -2249,11 +2287,11 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
 
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
-    if is_social_chat(prompt):
+    if not needs_context_lookup(prompt):
         return ""
     parts = []
     jobs = []
-    if len(prompt.split()) >= 2 and not re.fullmatch(r"(hi|hello|hey|yo|thanks|thank you|ok|okay)[!. ]*", lower) and not is_watch_request(prompt):
+    if needs_web_search(prompt):
         jobs.append(("web", web_search(prompt)))
     if (
         any(k in lower for k in ("nsfw", "adult", "hentai", "explicit"))
@@ -2308,9 +2346,9 @@ async def gather_context(prompt: str) -> str:
             parts.append("AniList adult anime (label NSFW; titles/scores only, no explicit descriptions): " + json.dumps(compact_anilist(result), ensure_ascii=False))
     return "\n".join(parts) if parts else "No preloaded data for this topic; answer from your own knowledge."
 
-async def query_gemini(api_key: str, messages: list, max_tokens: int = 2048, temperature: float = 0.7, timeout: int = 12) -> str:
+async def query_gemini(api_key: str, messages: list, max_tokens: int = 2048, temperature: float = 0.7, timeout: int = 12, model: str | None = None) -> str:
     prompt_text = "\n\n".join(f"{msg['role']}: {msg['content']}" for msg in messages)
-    models = ["gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-3.8-flash"]
+    models = [model] if model else ["gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-3.8-flash"]
     for m in models:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
@@ -2363,16 +2401,15 @@ async def classify_prompt_intent(session_key: str, prompt: str, summary: str = "
     user = ("Recent context:\n" + ("\n".join(context) if context else "(none)") + f"\nCurrent message: {prompt[:1200]}\nLabel:").strip()
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     if GROQ_KEYS:
-        for api_key in GROQ_KEYS[:2]:
-            try:
-                label = parse_intent_label(await query_groq(api_key, "openai/gpt-oss-120b", messages, max_tokens=12, temperature=0.0, timeout=3))
-                if label != "unknown":
-                    return label
-            except Exception as e:
-                logging.warning(f"Intent classifier Groq failed: {e}")
+        try:
+            label = parse_intent_label(await query_groq(GROQ_KEYS[0], "qwen/qwen3.8-27b", messages, max_tokens=12, temperature=0.0, timeout=1))
+            if label != "unknown":
+                return label
+        except Exception as e:
+            logging.warning(f"Intent classifier Groq failed: {e}")
     if GEMINI_KEY:
         try:
-            label = parse_intent_label(await query_gemini(GEMINI_KEY, messages, max_tokens=12, temperature=0.0, timeout=3))
+            label = parse_intent_label(await query_gemini(GEMINI_KEY, messages, max_tokens=12, temperature=0.0, timeout=1, model="gemini-2.5-flash-lite"))
             if label != "unknown":
                 return label
         except Exception as e:
@@ -2414,14 +2451,24 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         return reply
 
     session_summary = redact_sensitive(sanitize_sanin_links(str(((memory.get("sessions") or {}).get(session_key) or {}).get("summary", "")))).strip()
-    try:
-        intent = await asyncio.wait_for(classify_prompt_intent(session_key, original_prompt, session_summary, prior), timeout=4)
-    except asyncio.TimeoutError:
-        logging.warning("Intent classifier timed out")
-        intent = "unknown"
-    logging.info(f"[INTENT] {intent} text={original_prompt[:120]}")
-    social_chat = is_social_chat(original_prompt) or intent == "social"
-    skip_media_lookup = skip_media_lookup or social_chat
+    intent_started = time.monotonic()
+    if is_social_chat(original_prompt):
+        intent = "social"
+    elif is_media_lookup_prompt(original_prompt):
+        intent = "media_lookup"
+    elif asks_extension_repo(user_prompt):
+        intent = "repo"
+    elif is_watch_request(original_prompt):
+        intent = "watch"
+    else:
+        try:
+            intent = await asyncio.wait_for(classify_prompt_intent(session_key, original_prompt, session_summary, prior), timeout=2)
+        except asyncio.TimeoutError:
+            logging.warning("Intent classifier timed out")
+            intent = "unknown"
+    logging.info(f"[INTENT] {intent} in {time.monotonic() - intent_started:.2f}s text={original_prompt[:120]}")
+    social_chat = intent == "social"
+    skip_media_lookup = skip_media_lookup or intent in ("social", "watch", "support", "moderation", "repo", "other")
     repo_intent = intent == "repo" and any(k in user_prompt.lower() for k in ("repo", "plugin", "addon", "add-on", "extension"))
     if asks_extension_repo(user_prompt) or repo_intent:
         if status:
@@ -2448,10 +2495,14 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     if context is not None:
         verified = context
-    elif social_chat:
+    elif social_chat or not needs_context_lookup(user_prompt):
         verified = ""
     else:
-        verified = await gather_context(user_prompt)
+        try:
+            verified = await asyncio.wait_for(gather_context(user_prompt), timeout=6)
+        except asyncio.TimeoutError:
+            logging.warning("Context lookup timed out")
+            verified = ""
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
     if social_chat:
         system_prompt += "\n\nConversation mode: this is casual talk, a joke, or a dismissal, not a lookup. Reply like a person in a chat. Keep it short, react to what they actually said, and do not search, list titles, explain the app, or ask a generic 'what do you need'."
@@ -2480,19 +2531,23 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
                 details.append(f"- Style: {user_entry['tone']}. Adapt your tone to match, without being preachy.")
             if details:
                 system_prompt += f"\n\nAbout {user_name} (remembered):\n" + "\n".join(details)
+    safe_user_name = re.sub(r"\s+", " ", user_name or "").strip()[:80]
+    if safe_user_name:
+        system_prompt += f"\n\nCurrent Discord user: {safe_user_name}. Recognize them by their Discord ID and remembered history; never prefix your reply with their name."
     formatted_messages = [{"role": "system", "content": system_prompt}]
     for msg in conversation_history[session_key]:
         formatted_messages.append(msg)
-    user_content = f"{user_name}: {user_prompt}"
     if prior:
-        user_content = f"Previous message from San: {prior}\n{user_content}"
+        user_content = f"Previous message from San: {prior}\n{user_prompt}"
+    else:
+        user_content = user_prompt
     formatted_messages.append({"role": "user", "content": user_content})
 
     async def finish(reply: str) -> str:
         if re.search(r"\bCANNOT_HELP\b", reply, re.I):
             reply = f"Unfortunately I can't help with that. Ask <@{DEV_ID}> if you need a hand."
         else:
-            reply = clean_reply(reply)
+            reply = strip_self_prefix(clean_reply(reply), user_name)
             if is_watch_request(user_prompt):
                 reply = "\n".join(line for line in reply.splitlines() if not re.search(r"wotaku|wiki|livesports|sportsstream", line, re.I))
             if not allow_links:
