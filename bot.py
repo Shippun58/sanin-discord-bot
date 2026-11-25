@@ -1017,6 +1017,151 @@ async def web_search(query: str) -> list:
                 errors.append(str(e)[:80])
     raise Exception("search " + ", ".join(errors))
 
+YOUTUBE_URL_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com/(?:watch\?[^\s]*?v=|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})", re.I)
+YOUTUBE_HEADERS = {
+    **WEB_HEADERS,
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+}
+
+def youtube_video_ids(text: str) -> list:
+    return list(dict.fromkeys(YOUTUBE_URL_RE.findall(text or "")))
+
+def youtube_channel_handle(prompt: str) -> str | None:
+    if not is_info_request(prompt):
+        return None
+    match = re.search(r"(?:latest|newest)\s+(?:video|upload)\s+(?:on|from|by)\s+(?:the\s+)?(.+?)(?:\s+(?:main\s+)?channel)?[?.!]*$", prompt, re.I)
+    if not match:
+        return None
+    name = re.sub(r"\b(?:the|main|official|channel)\b", " ", match.group(1), flags=re.I).strip()
+    if name.lower() in ("this", "that", "my", "your", "our", "their", "youtube", "yt"):
+        return None
+    handle = re.sub(r"[^A-Za-z0-9._-]+", "", name)
+    return handle if len(handle) >= 2 else None
+
+def youtube_text(node) -> str:
+    if isinstance(node, dict):
+        if node.get("simpleText"):
+            return str(node["simpleText"])
+        if node.get("content"):
+            return str(node["content"])
+        runs = node.get("runs")
+        if isinstance(runs, list):
+            return "".join(str(run.get("text", "")) for run in runs if isinstance(run, dict))
+    return ""
+
+def youtube_channel_name(node) -> str:
+    if isinstance(node, dict):
+        label = node.get("a11yLabel")
+        if isinstance(label, str) and "Go to channel " in label:
+            return label.split("Go to channel ", 1)[1].strip()
+        for value in node.values():
+            found = youtube_channel_name(value)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = youtube_channel_name(value)
+            if found:
+                return found
+    return ""
+
+async def youtube_oembed(video_id: str) -> dict | None:
+    target = quote(f"https://www.youtube.com/watch?v={video_id}", safe="")
+    url = f"https://www.youtube.com/oembed?url={target}&format=json"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=YOUTUBE_HEADERS, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+    return {
+        "title": data.get("title", ""),
+        "channel": data.get("author_name", ""),
+        "channel_url": data.get("author_url", ""),
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+    }
+
+async def youtube_search(query: str) -> list:
+    url = "https://www.youtube.com/results?search_query=" + quote(query)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=YOUTUBE_HEADERS, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+            if resp.status != 200:
+                return []
+            html = await resp.text()
+    match = re.search(r"var ytInitialData = (\{.*?\});</script>", html, re.S)
+    if not match:
+        return []
+    try:
+        data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return []
+    videos = []
+    seen = set()
+    def walk(node):
+        if len(videos) >= 3:
+            return
+        if isinstance(node, dict):
+            renderer = node.get("videoRenderer")
+            if isinstance(renderer, dict):
+                video_id = renderer.get("videoId")
+                title = youtube_text(renderer.get("title"))
+                if video_id and title and video_id not in seen:
+                    seen.add(video_id)
+                    videos.append({
+                        "title": title,
+                        "channel": youtube_text(renderer.get("ownerText")) or youtube_text(renderer.get("longBylineText")),
+                        "published": youtube_text(renderer.get("publishedTimeText")),
+                        "url": f"https://www.youtube.com/watch?v={video_id}",
+                    })
+            lockup = node.get("lockupViewModel")
+            if isinstance(lockup, dict):
+                video_id = lockup.get("contentId")
+                metadata = ((lockup.get("metadata") or {}).get("lockupMetadataViewModel") or {})
+                title = youtube_text(metadata.get("title"))
+                if video_id and title and video_id not in seen:
+                    seen.add(video_id)
+                    videos.append({
+                        "title": title,
+                        "channel": youtube_channel_name(metadata),
+                        "published": "",
+                        "url": f"https://www.youtube.com/watch?v={video_id}",
+                    })
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+    walk(data)
+    return videos
+
+async def youtube_channel_latest(handle: str) -> dict | None:
+    page_url = f"https://www.youtube.com/@{handle}/videos"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(page_url, headers=YOUTUBE_HEADERS, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+            if resp.status != 200:
+                return None
+            html = await resp.text()
+        match = re.search(r'"externalId":"(UC[A-Za-z0-9_-]{22})"', html)
+        if not match:
+            return None
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={match.group(1)}"
+        async with session.get(rss_url, headers=YOUTUBE_HEADERS, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            if resp.status != 200:
+                return None
+            rss = await resp.text()
+    entry = re.search(r"<entry>(.*?)</entry>", rss, re.S)
+    if not entry:
+        return None
+    block = entry.group(1)
+    title = re.search(r"<title>(.*?)</title>", block, re.S)
+    link = re.search(r'<link rel="alternate" href="([^"]+)"', block)
+    published = re.search(r"<published>(.*?)</published>", block)
+    return {
+        "title": unescape(title.group(1)) if title else "",
+        "channel": handle,
+        "published": published.group(1) if published else "",
+        "url": link.group(1) if link else "",
+    }
+
 def clean_plugin_name(value) -> str:
     if not isinstance(value, str):
         return ""
@@ -1179,8 +1324,45 @@ def is_language_followup(prompt: str) -> bool:
     language_words = "|".join(re.escape(word) for word in sorted(LANGUAGE_HINTS, key=len, reverse=True))
     return bool(re.fullmatch(rf"(?:and|what about|how about)?\s*(?:{language_words})\s*[?.!]*", lower))
 
+def is_info_request(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    if "?" in prompt:
+        return True
+    return bool(re.match(r"^(?:ok|okay|so|and|but|hey|yo)?[,\s]*(?:what|which|show|find|check|search|send|link|can you|could you|do you|did you|have you|where|when|who|is there|any)\b", lower))
+
+def wants_fresh_check(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    if re.search(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/", lower):
+        return True
+    if youtube_channel_handle(prompt):
+        return True
+    patterns = (
+        r"\b(?:check|search|look|try)\s+(?:again|it again|reddit|youtube|online)\b",
+        r"\b(?:have|did) you (?:search|searched|check|checked|look|looked)\b",
+        r"\b(?:i'?m serious|no seriously|for real|source|proof|fact.?check|verify)\b",
+    )
+    if any(re.search(pattern, lower) for pattern in patterns):
+        return True
+    if re.search(r"\b(?:latest|newest)\s+(?:video|upload)\b", lower) and is_info_request(prompt) and re.search(r"\b(?:youtube|yt|channel)\b", lower):
+        return True
+    if re.search(r"\b(?:reddit|youtube|yt|channel|upload)\b", lower) and re.search(r"\b(?:search|check|verify|winner|won|official|upload|recent|days ago)\b", lower):
+        return is_info_request(prompt) or bool(re.search(r"\b(?:but|actually|serious|wrong|false|no|just|recent|recently|days ago|today|yesterday|source|proof)\b", lower))
+    return False
+
+def wants_youtube_lookup(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    if re.search(r"\bwho (?:won|wins|would win)\b", lower) and re.search(r"\b(?:vs\.?|versus)\b", lower):
+        return True
+    if re.search(r"\b(?:latest|newest)\s+(?:video|upload)\b", lower) and is_info_request(prompt) and re.search(r"\b(?:youtube|yt)\b", lower):
+        return True
+    if not re.search(r"\b(?:youtube|yt)\b", lower):
+        return False
+    return bool(re.search(r"\b(?:upload|winner|won|official|channel|search|check|verify|source|proof|recent|just now|today|yesterday|two days ago)\b", lower))
+
 def is_social_chat(prompt: str) -> bool:
     lower = prompt.lower().strip()
+    if wants_fresh_check(prompt):
+        return False
     if len(prompt.split()) > 18:
         return False
     if re.fullmatch(r"(?:nothing|nvm|never ?mind|no|nah|nope|ok|okay|k|alright|cool|thanks|thank you|ty|fair enough|makes sense|i see|got it|sure|yeah|yep|look|listen|find|search|lame|mid|cringe|weird|dumb|stupid|boring|bad|meh|sucks|trash|garbage|annoying|nice|good|great|wow|bruh|bro|lol|lmao|haha|funny|true|facts|mad tings?|tf|wtf)[!. ]*", lower):
@@ -1281,6 +1463,8 @@ def extract_media_title(prompt: str) -> str:
 
 def needs_web_search(prompt: str) -> bool:
     lower = prompt.lower()
+    if wants_fresh_check(prompt):
+        return True
     if is_social_chat(prompt) or is_watch_request(prompt) or asks_extension_repo(prompt):
         return False
     return bool(re.search(
@@ -1289,6 +1473,8 @@ def needs_web_search(prompt: str) -> bool:
     ))
 
 def needs_context_lookup(prompt: str) -> bool:
+    if wants_fresh_check(prompt):
+        return True
     if is_social_chat(prompt) or is_watch_request(prompt) or asks_extension_repo(prompt):
         return False
     if is_media_lookup_prompt(prompt) or needs_web_search(prompt):
@@ -2285,47 +2471,75 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
                 parts.append("I checked stremio-addons.net but didn't find a matching add-on.")
     return "\n\n".join(parts) or None
 
-async def gather_context(prompt: str) -> str:
+async def gather_context(prompt: str, extra_video_ids: list | None = None) -> str:
     lower = prompt.lower()
     if not needs_context_lookup(prompt):
         return ""
     parts = []
     jobs = []
-    if needs_web_search(prompt):
+    failures = []
+    video_ids = list(dict.fromkeys(youtube_video_ids(prompt) + list(extra_video_ids or [])))
+    channel_handle = youtube_channel_handle(prompt)
+    youtube_query = wants_youtube_lookup(prompt)
+    youtube_specific = bool(video_ids or channel_handle or youtube_query)
+    if needs_web_search(prompt) and not youtube_specific:
         jobs.append(("web", web_search(prompt)))
-    if (
-        any(k in lower for k in ("nsfw", "adult", "hentai", "explicit"))
-        and any(k in lower for k in ("recommend", "suggest", "title", "titles", "watch", "give me", "show me"))
-        and "anime" in lower
-    ):
-        jobs.append(("adult_anime", anilist_adult()))
-    if any(k in lower for k in (" vs ", " versus ", "showdown", "who would win", "character", "debate")):
-        sides = re.split(r"\s+(?:vs\.?|versus)\s+", prompt, maxsplit=1, flags=re.I)
-        for side in sides[:2]:
-            name = extract_title(side)
-            if len(name) >= 2:
-                jobs.append((f"character:{name}", anilist_character(name)))
-                jobs.append((f"charwiki:{name}", wiki_search(name)))
-    else:
-        title = extract_title(prompt)
-        if len(title) >= 2:
-            jobs.append(("wiki", wiki_search(title)))
-            if any(k in lower for k in ("repo", "extension", "source")) and not any(k in lower for k in ("source code", "github repo")):
-                jobs.append(("wotaku", wotaku_repos(lower)))
-            if any(k in lower for k in ("anime", "manga", "show", "movie", "series", "release", "air", "episode", "episodes", "chapter", "chapters", "how many", "score", "compare", "better", "season", "when", "rumor", "rumour", "leak", "form", "next", "long", "good", "worth", "recommend")):
-                jobs.append(("anilist_anime", anilist_search(title, "ANIME")))
-                jobs.append(("anilist_manga", anilist_search(title, "MANGA")))
-                if TMDB_API_KEY:
-                    jobs.append(("tmdb_tv", tmdb_search(title, "tv")))
-                    jobs.append(("tmdb_movie", tmdb_search(title, "movie")))
+    for video_id in video_ids[:2]:
+        jobs.append((f"ytvideo:{video_id}", youtube_oembed(video_id)))
+    if channel_handle and re.search(r"\b(?:latest|newest)\b", lower):
+        jobs.append((f"ytchannel:{channel_handle}", youtube_channel_latest(channel_handle)))
+    elif youtube_query:
+        jobs.append(("ytsearch", youtube_search(prompt)))
+    if not youtube_specific:
+        if (
+            any(k in lower for k in ("nsfw", "adult", "hentai", "explicit"))
+            and any(k in lower for k in ("recommend", "suggest", "title", "titles", "watch", "give me", "show me"))
+            and "anime" in lower
+        ):
+            jobs.append(("adult_anime", anilist_adult()))
+        if any(k in lower for k in (" vs ", " versus ", "showdown", "who would win", "character", "debate")):
+            sides = re.split(r"\s+(?:vs\.?|versus)\s+", prompt, maxsplit=1, flags=re.I)
+            for side in sides[:2]:
+                name = extract_title(side)
+                if len(name) >= 2:
+                    jobs.append((f"character:{name}", anilist_character(name)))
+                    jobs.append((f"charwiki:{name}", wiki_search(name)))
+        else:
+            title = extract_title(prompt)
+            if len(title) >= 2:
+                jobs.append(("wiki", wiki_search(title)))
+                if any(k in lower for k in ("repo", "extension", "source")) and not any(k in lower for k in ("source code", "github repo")):
+                    jobs.append(("wotaku", wotaku_repos(lower)))
+                if any(k in lower for k in ("anime", "manga", "show", "movie", "series", "release", "air", "episode", "episodes", "chapter", "chapters", "how many", "score", "compare", "better", "season", "when", "rumor", "rumour", "leak", "form", "next", "long", "good", "worth", "recommend")):
+                    jobs.append(("anilist_anime", anilist_search(title, "ANIME")))
+                    jobs.append(("anilist_manga", anilist_search(title, "MANGA")))
+                    if TMDB_API_KEY:
+                        jobs.append(("tmdb_tv", tmdb_search(title, "tv")))
+                        jobs.append(("tmdb_movie", tmdb_search(title, "movie")))
     if not jobs:
         return "\n".join(parts)
     results = await asyncio.gather(*(job[1] for job in jobs), return_exceptions=True)
     for (name, _), result in zip(jobs, results):
         if isinstance(result, Exception):
             logging.warning(f"{name} lookup failed: {result}")
+            failures.append(name)
             continue
-        if name.startswith("character:"):
+        if name.startswith("ytvideo:"):
+            if result:
+                parts.append("YouTube video metadata (verified): " + json.dumps(result, ensure_ascii=False))
+            else:
+                failures.append(name)
+        elif name.startswith("ytchannel:"):
+            if result:
+                parts.append("Latest upload from YouTube channel (verified): " + json.dumps(result, ensure_ascii=False))
+            else:
+                failures.append(name)
+        elif name == "ytsearch":
+            if result:
+                parts.append("YouTube search results (verified metadata; use these facts): " + json.dumps(result, ensure_ascii=False))
+            else:
+                failures.append(name)
+        elif name.startswith("character:"):
             data = compact_character(result)
             if data:
                 parts.append(f"Character {name.split(':', 1)[1]} via AniList: " + json.dumps(data, ensure_ascii=False))
@@ -2344,7 +2558,13 @@ async def gather_context(prompt: str) -> str:
             parts.append("Web search results (use these facts to answer; do not dump the list): " + json.dumps(result, ensure_ascii=False))
         elif name == "adult_anime" and result:
             parts.append("AniList adult anime (label NSFW; titles/scores only, no explicit descriptions): " + json.dumps(compact_anilist(result), ensure_ascii=False))
-    return "\n".join(parts) if parts else "No preloaded data for this topic; answer from your own knowledge."
+    if failures:
+        parts.append("Live lookup failed for: " + ", ".join(sorted(set(failures))) + ". Do not claim that a recent video, episode, match, or event does not exist. Say you could not verify it right now.")
+    if parts:
+        return "\n".join(parts)
+    if failures:
+        return "Live lookup failed. Do not claim that a recent video, episode, match, or event does not exist. Say you could not verify it right now."
+    return "No preloaded data for this topic; answer from your own knowledge."
 
 async def query_gemini(api_key: str, messages: list, max_tokens: int = 2048, temperature: float = 0.7, timeout: int = 12, model: str | None = None) -> str:
     prompt_text = "\n\n".join(f"{msg['role']}: {msg['content']}" for msg in messages)
@@ -2452,7 +2672,9 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     session_summary = redact_sensitive(sanitize_sanin_links(str(((memory.get("sessions") or {}).get(session_key) or {}).get("summary", "")))).strip()
     intent_started = time.monotonic()
-    if is_social_chat(original_prompt):
+    if wants_fresh_check(original_prompt):
+        intent = "web_check"
+    elif is_social_chat(original_prompt):
         intent = "social"
     elif is_media_lookup_prompt(original_prompt):
         intent = "media_lookup"
@@ -2468,7 +2690,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
             intent = "unknown"
     logging.info(f"[INTENT] {intent} in {time.monotonic() - intent_started:.2f}s text={original_prompt[:120]}")
     social_chat = intent == "social"
-    skip_media_lookup = skip_media_lookup or intent in ("social", "watch", "support", "moderation", "repo", "other")
+    skip_media_lookup = skip_media_lookup or intent in ("social", "watch", "support", "moderation", "repo", "other", "web_check")
     repo_intent = intent == "repo" and any(k in user_prompt.lower() for k in ("repo", "plugin", "addon", "add-on", "extension"))
     if asks_extension_repo(user_prompt) or repo_intent:
         if status:
@@ -2493,17 +2715,27 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
         await record_exchange(session_key, user_prompt, media_answer)
         return media_answer
 
+    recent_video_ids = []
+    if wants_fresh_check(original_prompt):
+        for entry in reversed(conversation_history[session_key][-8:]):
+            if entry.get("role") == "user":
+                recent_video_ids.extend(youtube_video_ids(str(entry.get("content", ""))))
+        recent_video_ids = list(dict.fromkeys(recent_video_ids))[:2]
+    lookup_failed = False
     if context is not None:
         verified = context
     elif social_chat or not needs_context_lookup(user_prompt):
         verified = ""
     else:
         try:
-            verified = await asyncio.wait_for(gather_context(user_prompt), timeout=6)
+            verified = await asyncio.wait_for(gather_context(user_prompt, recent_video_ids), timeout=6)
         except asyncio.TimeoutError:
             logging.warning("Context lookup timed out")
             verified = ""
+            lookup_failed = True
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
+    if lookup_failed or "Live lookup failed" in verified:
+        system_prompt += "\n\nLookup accuracy rule: live verification failed or timed out. Do not claim that a recent video, episode, match, or event does not exist. Say you could not verify it right now instead of guessing."
     if social_chat:
         system_prompt += "\n\nConversation mode: this is casual talk, a joke, or a dismissal, not a lookup. Reply like a person in a chat. Keep it short, react to what they actually said, and do not search, list titles, explain the app, or ask a generic 'what do you need'."
     if is_watch_request(user_prompt):
