@@ -1173,9 +1173,32 @@ def is_language_followup(prompt: str) -> bool:
     language_words = "|".join(re.escape(word) for word in sorted(LANGUAGE_HINTS, key=len, reverse=True))
     return bool(re.fullmatch(rf"(?:and|what about|how about)?\s*(?:{language_words})\s*[?.!]*", lower))
 
+def is_social_chat(prompt: str) -> bool:
+    lower = prompt.lower().strip()
+    if len(prompt.split()) > 18:
+        return False
+    if re.fullmatch(r"(?:nothing|nvm|never ?mind|no|nah|nope|ok|okay|k|alright|cool|thanks|thank you|ty|fair enough|makes sense|i see|got it|sure|yeah|yep|look|listen|find|search)[!. ]*", lower):
+        return True
+    patterns = (
+        r"\bi (?:never|didn'?t|did not) ask(?:ed)?\b",
+        r"\b(?:that'?s|that is|this is) not what i\b",
+        r"\bnot what i (?:asked|meant|said)\b",
+        r"\bi (?:was|am) (?:just )?(?:trying|looking) to (?:chat|talk|have a conversation)\b",
+        r"\b(?:just|only) (?:chatting|talking|conversing|having a conversation)\b",
+        r"^(?:can we|let'?s) (?:just )?(?:chat|talk)\b",
+        r"^(?:i'?m|im) just (?:chatting|talking|here to chat)\b",
+        r"^(?:look|listen|see|check)\s+(?:at\s+)?(?:this|that|it|here)\b",
+        r"^(?:look|listen|see)\s+(?:who|what)\b",
+        r"^(?:looks?|seems?)\s+(?:good|bad|cool|fine|great|nice|interesting|weird|off)\b",
+        r"^(?:find|look for|search for)\s+(?:it|this|that)\b",
+        r"^(?:i\s+)?(?:found|looked|searched)\b.{0,20}\b(?:it|this|that)\b",
+        r"^let me (?:look|check|see|find)\b",
+    )
+    return any(re.search(pattern, lower) for pattern in patterns)
+
 def is_media_lookup_prompt(prompt: str) -> bool:
     lower = prompt.lower().strip()
-    if is_watch_request(prompt) or asks_extension_repo(prompt):
+    if is_social_chat(prompt) or is_watch_request(prompt) or asks_extension_repo(prompt):
         return False
     if re.search(r"\b(vs\.?|versus|who would win|source code|hosted|created you|your name|who are you|moderation|ban|kick)\b", lower):
         return False
@@ -2197,6 +2220,8 @@ async def repo_recommendation(prompt: str, facts: list | None = None) -> str | N
 
 async def gather_context(prompt: str) -> str:
     lower = prompt.lower()
+    if is_social_chat(prompt):
+        return ""
     parts = []
     jobs = []
     if len(prompt.split()) >= 2 and not re.fullmatch(r"(hi|hello|hey|yo|thanks|thank you|ok|okay)[!. ]*", lower) and not is_watch_request(prompt):
@@ -2278,7 +2303,7 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     session_key = f"{channel_id}:{user_id or user_name}"
     original_prompt = user_prompt
-    skip_media_lookup = is_evaluative_followup(original_prompt)
+    skip_media_lookup = is_evaluative_followup(original_prompt) or is_social_chat(original_prompt)
     memory = await load_memory()
     hydrate_session(session_key, memory)
     retry_re = re.compile(r"(?:retry|try again|again|recheck|check again|try it again)[!. ]*", re.I)
@@ -2332,6 +2357,8 @@ async def get_ai_response(channel_id: int, user_name: str, user_prompt: str, con
 
     verified = context if context is not None else await gather_context(user_prompt)
     system_prompt = SANIN_SYSTEM_PROMPT + "\n\nVerified data (helpful context, not a limit):\n" + verified
+    if is_social_chat(original_prompt):
+        system_prompt += "\n\nConversation mode: this is casual talk, a joke, or a dismissal, not a lookup. Reply like a person in a chat. Keep it short, react to what they actually said, and do not search, list titles, explain the app, or ask a generic 'what do you need'."
     if is_watch_request(user_prompt):
         system_prompt += "\n\nWatch request: answer with steps to watch it inside Sanin only. Do not mention Netflix, Hulu, Crunchyroll, Prime Video, JustWatch, or any other app or site. Use Anime mode for anime and Movie & TV mode for movies/shows, then Extension Manager repo/add-on, Search, open the title, and switch server/source if needed. Never name or recommend a specific repo, plugin, add-on, or wiki; give only the generic steps."
         if any(k in user_prompt.lower() for k in ("live", "sport", "match", "football", "city vs", "fulham")):
